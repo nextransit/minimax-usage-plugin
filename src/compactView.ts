@@ -20,6 +20,7 @@ export type CompactTooltipLinesInput = {
   weeklyUsed?: number | null;
   weeklyTotal?: number | null;
   weeklyPercent?: number | null;
+  weeklyPercentIsRemaining?: boolean;
   barLength?: number;
 };
 
@@ -84,13 +85,13 @@ export function getCompactTooltipLabels(language: "zh-CN" | "en"): {
   if (language === "en") {
     return {
       current: "Current:",
-      weekly: "Weekly:",
+      weekly: "Weekly left:",
     };
   }
 
   return {
     current: "当前周期:",
-    weekly: "本周累计:",
+    weekly: "本周剩余:",
   };
 }
 
@@ -206,6 +207,7 @@ function buildCompactTooltipRows(input: CompactTooltipLinesInput): CompactToolti
         input.weeklyTotal,
         input.weeklyPercent,
         input.barLength,
+        input.weeklyPercentIsRemaining,
       ),
     );
   }
@@ -219,6 +221,7 @@ function createCompactTooltipRow(
   total: number,
   percent: number,
   barLength: number | undefined,
+  percentIsRemaining: boolean = false,
 ): CompactTooltipRow {
   const segments = getProgressBarSegments(percent, barLength ?? 16);
   return {
@@ -227,8 +230,20 @@ function createCompactTooltipRow(
     percent,
     emptyBar: segments.empty,
     filledBar: segments.filled,
-    color: selectCompactProgressColor(percent),
+    color: percentIsRemaining ? selectRemainingProgressColor(percent) : selectCompactProgressColor(percent),
   };
+}
+
+function selectRemainingProgressColor(percent: number): string {
+  const safePercent = normalizePercent(percent);
+
+  if (safePercent <= 10) {
+    return "#ff4d4f";
+  }
+  if (safePercent <= 30) {
+    return "#faad14";
+  }
+  return "#52c41a";
 }
 
 function getProgressBarSegments(percent: number, length: number): { empty: string; filled: string } {

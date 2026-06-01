@@ -199,6 +199,7 @@ pub struct SummaryUsageData {
     pub weekly_remaining_count: Option<i64>,
     pub weekly_used_count: Option<i64>,
     pub weekly_used_percent: Option<f64>,
+    pub weekly_remaining_percent: Option<f64>,
     pub active_keys_count: usize,
     pub loaded_keys_count: usize,
     pub has_error: bool,
@@ -214,6 +215,7 @@ impl SummaryUsageData {
         let mut weekly_total_count = 0i64;
         let mut weekly_remaining_count = 0i64;
         let mut weekly_used_count = 0i64;
+        let mut min_weekly_remaining_percent: Option<f64> = None;
         let mut has_any_data = false;
 
         // 遍历所有配置的 API Key
@@ -242,6 +244,13 @@ impl SummaryUsageData {
                     if let Some(cnt) = data.weekly_used_count {
                         weekly_used_count += cnt;
                     }
+                    if let Some(pct) = data.weekly_remaining_percent {
+                        min_weekly_remaining_percent = Some(
+                            min_weekly_remaining_percent
+                                .map(|current| current.min(pct))
+                                .unwrap_or(pct),
+                        );
+                    }
                 } else {
                     summary.has_error = true;
                 }
@@ -264,8 +273,12 @@ impl SummaryUsageData {
             summary.weekly_used_count = Some(weekly_used_count);
             summary.weekly_used_percent =
                 Some((weekly_used_count as f64 / weekly_total_count as f64) * 100.0);
+            summary.weekly_remaining_percent = min_weekly_remaining_percent.or_else(|| {
+                Some((weekly_remaining_count as f64 / weekly_total_count as f64) * 100.0)
+            });
         } else if has_any_data {
             summary.weekly_used_percent = Some(0.0);
+            summary.weekly_remaining_percent = min_weekly_remaining_percent;
         }
 
         summary.active_keys_count = config.api_keys.iter().filter(|e| e.is_active).count();
@@ -281,11 +294,11 @@ fn format_summary_tray_usage(summary: &SummaryUsageData) -> Option<String> {
     }
 
     // 如果没有任何加载的数据，返回 key 数量
-    if summary.used_percent.is_none() && summary.weekly_used_percent.is_none() {
+    if summary.used_percent.is_none() && summary.weekly_remaining_percent.is_none() {
         return Some(format!("{}🔑", summary.active_keys_count));
     }
 
-    format_tray_usage(summary.used_percent, summary.weekly_used_percent)
+    format_tray_usage(summary.used_percent, summary.weekly_remaining_percent)
 }
 
 fn format_percent(percent: Option<f64>) -> Option<String> {
@@ -338,8 +351,8 @@ pub fn build_tooltip(usage: &UsageData, i18n: &TrayI18n) -> String {
             i18n.weekly_remaining_prefix, wk_remaining
         ));
     }
-    if let Some(wk_pct) = usage.weekly_used_percent {
-        parts.push(format!("Weekly Used: {:.0}%", wk_pct));
+    if let Some(wk_pct) = usage.weekly_remaining_percent {
+        parts.push(format!("Weekly Left: {:.0}%", wk_pct));
     }
     parts.join("\n")
 }
@@ -384,17 +397,9 @@ pub fn update_tray_menu(app: &AppHandle, state: &AppState) {
     let status_text = if summary.active_keys_count > 0 {
         if summary.has_error {
             format!("⚠️ {} API Key(s)", summary.active_keys_count)
-        } else if summary.used_percent.is_some() {
+        } else if summary.used_percent.is_some() || summary.weekly_remaining_percent.is_some() {
             if config.show_percent_in_tray {
-                if let Some(pct) = summary.used_percent {
-                    format!(
-                        "{:.0}% / {:.0}%",
-                        pct,
-                        summary.weekly_used_percent.unwrap_or(0.0)
-                    )
-                } else {
-                    i18n.app_name.to_string()
-                }
+                format_summary_tray_usage(&summary).unwrap_or_else(|| i18n.app_name.to_string())
             } else {
                 i18n.app_name.to_string()
             }
@@ -483,10 +488,21 @@ pub fn update_tray_menu(app: &AppHandle, state: &AppState) {
             }
 
             if let Some(ref weekly_remaining) = data.weekly_remaining_count {
+                let weekly_label = data
+                    .weekly_remaining_percent
+                    .map(|pct| {
+                        format!(
+                            "{}: {} ({:.0}%)",
+                            i18n.weekly_remaining_prefix, weekly_remaining, pct
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        format!("{}: {}", i18n.weekly_remaining_prefix, weekly_remaining)
+                    });
                 let weekly_item = MenuItem::with_id(
                     app,
                     "weekly_remaining",
-                    format!("{}: {}", i18n.weekly_remaining_prefix, weekly_remaining),
+                    weekly_label,
                     false,
                     None::<&str>,
                 )
@@ -768,4 +784,79 @@ pub fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     update_tray_menu(&app_handle, &state);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::ApiKeyEntry;
+
+    fn make_config() -> AppConfig {
+        let mut config = AppConfig::default();
+        config.api_keys = vec![ApiKeyEntry {
+            id: "key-1".to_string(),
+            name: "Test".to_string(),
+            color: "#00d4ff".to_string(),
+            keychain_service: "svc".to_string(),
+            keychain_account: "acct".to_string(),
+            refresh_interval: 20,
+            created_at: 0,
+            is_active: true,
+            endpoint: "domestic".to_string(),
+        }];
+        config
+    }
+
+    fn make_usage(weekly_remaining_percent: Option<f64>) -> UsageData {
+        UsageData {
+            ok: true,
+            status_label: "Success".to_string(),
+            primary_model_name: "video".to_string(),
+            time_window: String::new(),
+            reset_timestamp: None,
+            reset_in_label: String::new(),
+            total_count: Some(3),
+            remaining_count: Some(3),
+            used_count: Some(0),
+            used_percent: Some(0.0),
+            remaining_percent: Some(100.0),
+            weekly_total_count: Some(21),
+            weekly_used_count: Some(0),
+            weekly_remaining_count: Some(21),
+            weekly_used_percent: weekly_remaining_percent.map(|pct| 100.0 - pct),
+            weekly_remaining_percent,
+            weekly_reset_timestamp: None,
+            weekly_reset_in_label: String::new(),
+            interval_label: String::new(),
+            models: vec![],
+            last_updated: "2026-06-01 14:00:00".to_string(),
+        }
+    }
+
+    #[test]
+    fn tray_summary_uses_reported_weekly_remaining_percent() {
+        let config = make_config();
+        let mut usage = HashMap::new();
+        usage.insert("key-1".to_string(), make_usage(Some(89.0)));
+
+        let summary = SummaryUsageData::from_usage_map(&config, &usage);
+
+        assert_eq!(summary.weekly_remaining_percent, Some(89.0));
+        assert_eq!(format_summary_tray_usage(&summary).as_deref(), Some("0%/89%"));
+    }
+
+    #[test]
+    fn tray_summary_falls_back_to_weekly_remaining_count_ratio() {
+        let config = make_config();
+        let mut usage_data = make_usage(None);
+        usage_data.weekly_used_count = Some(5);
+        usage_data.weekly_remaining_count = Some(16);
+        usage_data.weekly_used_percent = Some(5.0 / 21.0 * 100.0);
+        let mut usage = HashMap::new();
+        usage.insert("key-1".to_string(), usage_data);
+
+        let summary = SummaryUsageData::from_usage_map(&config, &usage);
+
+        assert_eq!(format_summary_tray_usage(&summary).as_deref(), Some("0%/76%"));
+    }
 }

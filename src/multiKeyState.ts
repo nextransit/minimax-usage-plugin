@@ -26,10 +26,12 @@ export interface UsageViewModel {
   minRemainingCount: number | null;
   usedCount: number | null;
   usedPercent: number | null;
+  remainingPercent: number | null;
   weeklyTotalCount: number | null;
   weeklyUsedCount: number | null;
   weeklyRemainingCount: number | null;
   weeklyUsedPercent: number | null;
+  weeklyRemainingPercent: number | null;
   weeklyResetTimestamp: number | null;
   weeklyResetInLabel: string;
   intervalLabel: string;

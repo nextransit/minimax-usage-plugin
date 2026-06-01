@@ -45,6 +45,15 @@ fn build_quota_risk_candidate(
     total_count: Option<i64>,
     window: &'static str,
 ) -> Option<QuotaRiskCandidate> {
+    build_quota_risk_candidate_with_percent(remaining_count, total_count, None, window)
+}
+
+fn build_quota_risk_candidate_with_percent(
+    remaining_count: Option<i64>,
+    total_count: Option<i64>,
+    remaining_percent: Option<f64>,
+    window: &'static str,
+) -> Option<QuotaRiskCandidate> {
     let remaining_count = remaining_count?;
     let total_count = total_count?;
 
@@ -56,7 +65,10 @@ fn build_quota_risk_candidate(
     Some(QuotaRiskCandidate {
         remaining_count: normalized_remaining,
         total_count,
-        remaining_ratio: normalized_remaining as f64 / total_count as f64,
+        remaining_ratio: remaining_percent
+            .filter(|percent| percent.is_finite())
+            .map(|percent| percent.clamp(0.0, 100.0) / 100.0)
+            .unwrap_or_else(|| normalized_remaining as f64 / total_count as f64),
         window,
     })
 }
@@ -189,9 +201,10 @@ async fn refresh_usage_data(
                         risk_candidates.push(candidate);
                     }
                 }
-                if let Some(candidate) = build_quota_risk_candidate(
+                if let Some(candidate) = build_quota_risk_candidate_with_percent(
                     data.weekly_remaining_count,
                     data.weekly_total_count,
+                    data.weekly_remaining_percent,
                     "weekly",
                 ) {
                     risk_candidates.push(candidate);

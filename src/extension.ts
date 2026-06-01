@@ -16,11 +16,21 @@ import * as fs from "fs";
 
 const ENDPOINT_BASE_URLS: Record<string, string> = {
   domestic: "https://www.minimaxi.com",
+  overseas: "https://www.minimax.io",
+};
+
+const LEGACY_ENDPOINT_BASE_URLS: Record<string, string> = {
+  domestic: "https://www.minimaxi.com",
   overseas: "https://platform.minimax.io",
 };
 
-function getEndpointUrl(endpoint?: string): string {
+function getTokenPlanEndpointUrl(endpoint?: string): string {
   const base = ENDPOINT_BASE_URLS[endpoint || "domestic"] || ENDPOINT_BASE_URLS.domestic;
+  return `${base}/v1/token_plan/remains`;
+}
+
+function getLegacyCodingPlanEndpointUrl(endpoint?: string): string {
+  const base = LEGACY_ENDPOINT_BASE_URLS[endpoint || "domestic"] || LEGACY_ENDPOINT_BASE_URLS.domestic;
   return `${base}/v1/api/openplatform/coding_plan/remains`;
 }
 
@@ -30,9 +40,11 @@ type ModelRemain = {
   remains_time?: number;
   current_interval_total_count?: number;
   current_interval_usage_count?: number;
+  current_interval_remaining_percent?: number;
   model_name?: string;
   current_weekly_total_count?: number;
   current_weekly_usage_count?: number;
+  current_weekly_remaining_percent?: number;
   weekly_remains_time?: number;
 };
 
@@ -60,10 +72,12 @@ type UsageViewModel = {
   minRemainingCount: number | null;
   usedCount: number | null;
   usedPercent: number | null;
+  remainingPercent: number | null;
   weeklyTotalCount: number | null;
   weeklyUsedCount: number | null;
   weeklyRemainingCount: number | null;
   weeklyUsedPercent: number | null;
+  weeklyRemainingPercent: number | null;
   weeklyResetTimestamp: number | null;
   weeklyResetInLabel: string;
   intervalLabel: string;
@@ -82,6 +96,7 @@ type RemainsResult = {
   statusCode: number | null;
   summary: string;
   raw: unknown;
+  usageCountSemantics: "used" | "remaining";
 };
 
 type LanguagePreference = "auto" | "zh-CN" | "en";
@@ -148,10 +163,12 @@ const emptyUsageViewModel = {
   minRemainingCount: null,
   usedCount: null,
   usedPercent: null,
+  remainingPercent: null,
   weeklyTotalCount: null,
   weeklyUsedCount: null,
   weeklyRemainingCount: null,
   weeklyUsedPercent: null,
+  weeklyRemainingPercent: null,
   weeklyResetTimestamp: null,
   weeklyResetInLabel: "",
   intervalLabel: "",
@@ -729,8 +746,9 @@ async function refreshUsageForKey(keyId: string, reason: "startup" | "auto" | "m
       minRemainingModelName: "", minRemainingWindow: "current" as const,
       timeWindow: "", resetInLabel: "", resetTimestamp: null,
       totalCount: null, remainingCount: null, minRemainingCount: null,
-      usedCount: null, usedPercent: null, weeklyTotalCount: null,
+      usedCount: null, usedPercent: null, remainingPercent: null, weeklyTotalCount: null,
       weeklyUsedCount: null, weeklyRemainingCount: null, weeklyUsedPercent: null,
+      weeklyRemainingPercent: null,
       weeklyResetTimestamp: null, weeklyResetInLabel: "",
       intervalLabel: "", models: [], raw: null,
     });
@@ -768,8 +786,6 @@ async function refreshUsageForKey(keyId: string, reason: "startup" | "auto" | "m
     log(`refresh key [${keyId}] [${reason}] ok=${result.ok} status=${result.statusCode ?? "N/A"}`);
 
     // High-risk popup: use the normalized remaining ratio only.
-    // MiniMax API `usage_count` means used count; remaining is derived as
-    // total_count - usage_count in buildUsageViewModel().
     if (result.ok) {
       const riskCandidate = getLowestRemainingRatioCandidate(vm);
 
@@ -949,15 +965,23 @@ function updateStatusBar(): void {
   const usedPercent = currentMetrics.percent;
   const resetLabel = displayVm.resetTimestamp ? formatEnglishCountdownFriendly(displayVm.resetTimestamp) : "";
   const percentColor = selectCompactProgressColor(usedPercent);
+  const weeklyRemainingPercent =
+    displayVm.weeklyRemainingPercent !== null
+      ? displayVm.weeklyRemainingPercent
+      : (displayVm.weeklyUsedPercent !== null ? 100 - displayVm.weeklyUsedPercent : null);
   const weeklyPercent =
-    config.showWeeklyInStatusBar && currentMetrics.percent > 0 && displayVm.weeklyUsedPercent !== null
-      ? displayVm.weeklyUsedPercent ?? 0
+    config.showWeeklyInStatusBar && weeklyRemainingPercent !== null
+      ? weeklyRemainingPercent
       : null;
+  const weeklyRiskPercent =
+    displayVm.weeklyUsedPercent !== null
+      ? displayVm.weeklyUsedPercent
+      : (weeklyRemainingPercent !== null ? 100 - weeklyRemainingPercent : null);
   const weeklyResetLabel =
     config.showWeeklyInStatusBar && displayVm.weeklyResetTimestamp
       ? formatEnglishCountdownFriendly(displayVm.weeklyResetTimestamp)
       : "";
-  const statusIcon = selectCompactStatusIcon({ currentPercent: usedPercent, weeklyPercent });
+  const statusIcon = selectCompactStatusIcon({ currentPercent: usedPercent, weeklyPercent: weeklyRiskPercent });
   const compactStatusText = buildCompactStatusText({
     icon: statusIcon,
     currentPercent: usedPercent,
@@ -1061,10 +1085,12 @@ function convertUsageToAppJsFormat(u: UsageViewModel): Record<string, unknown> {
     remaining_count: u.remainingCount,
     used_count: u.usedCount,
     used_percent: u.usedPercent,
+    remaining_percent: u.remainingPercent,
     weekly_total_count: u.weeklyTotalCount,
     weekly_used_count: u.weeklyUsedCount,
     weekly_remaining_count: u.weeklyRemainingCount,
     weekly_used_percent: u.weeklyUsedPercent,
+    weekly_remaining_percent: u.weeklyRemainingPercent,
     weekly_reset_timestamp: u.weeklyResetTimestamp,
     weekly_reset_in_label: u.weeklyResetInLabel,
     interval_label: u.intervalLabel,
@@ -1376,7 +1402,9 @@ function buildMultiKeyTooltip(config: ExtensionConfig): vscode.MarkdownString {
     }
 
     const currentPercent = Math.round(u.usedPercent ?? 0);
-    const weeklyPercent = u.weeklyUsedPercent !== null ? Math.round(u.weeklyUsedPercent) : null;
+    const weeklyPercent = u.weeklyRemainingPercent !== null
+      ? Math.round(u.weeklyRemainingPercent)
+      : (u.weeklyUsedPercent !== null ? Math.round(100 - u.weeklyUsedPercent) : null);
 
     const compactTable = buildCompactTooltipTable({
       currentLabel: tooltipLabels.current,
@@ -1384,9 +1412,10 @@ function buildMultiKeyTooltip(config: ExtensionConfig): vscode.MarkdownString {
       currentTotal: u.totalCount ?? 0,
       currentPercent,
       weeklyLabel: weeklyPercent !== null ? tooltipLabels.weekly : undefined,
-      weeklyUsed: u.weeklyUsedCount,
+      weeklyUsed: u.weeklyRemainingCount,
       weeklyTotal: u.weeklyTotalCount,
       weeklyPercent,
+      weeklyPercentIsRemaining: true,
       barLength: 20,
     });
 
@@ -1417,10 +1446,12 @@ function buildAggregateVm(metrics: { used: number; remaining: number; total: num
     minRemainingCount: null,
     usedCount: metrics.used,
     usedPercent: metrics.percent,
+    remainingPercent: metrics.total > 0 ? Math.max(0, 100 - metrics.percent) : null,
     weeklyTotalCount: null,
     weeklyUsedCount: null,
     weeklyRemainingCount: null,
     weeklyUsedPercent: null,
+    weeklyRemainingPercent: null,
     weeklyResetTimestamp: null,
     weeklyResetInLabel: "",
     intervalLabel: "",
@@ -1623,6 +1654,7 @@ function buildWeeklyQuotaRiskCandidate(
   remainingCount: number | null,
   totalCount: number | null,
   modelName: string,
+  remainingPercent: number | null = null,
 ): QuotaRiskCandidate | null {
   if (remainingCount === null || totalCount === null || totalCount <= 0) {
     return null;
@@ -1632,7 +1664,10 @@ function buildWeeklyQuotaRiskCandidate(
   return {
     remainingCount: normalizedRemaining,
     totalCount,
-    remainingRatio: normalizedRemaining / totalCount,
+    remainingRatio:
+      remainingPercent !== null
+        ? clampPercent(remainingPercent) / 100
+        : normalizedRemaining / totalCount,
     window: "weekly",
     modelName,
   };
@@ -1688,6 +1723,7 @@ function getLowestRemainingRatioCandidate(vm: UsageViewModel): QuotaRiskCandidat
     vm.weeklyRemainingCount,
     vm.weeklyTotalCount,
     vm.primaryModelName || vm.minRemainingModelName || "",
+    vm.weeklyRemainingPercent,
   );
   if (weeklyCandidate) {
     candidates.push(weeklyCandidate);
@@ -1709,11 +1745,68 @@ function buildErrorViewModel(message: string, raw: unknown = null): UsageViewMod
   };
 }
 
+function hasCurrentQuotaData(model: ModelRemain): boolean {
+  return (model.current_interval_total_count ?? 0) > 0 ||
+    (model.current_interval_usage_count ?? 0) > 0;
+}
+
+function hasWeeklyQuotaData(model: ModelRemain): boolean {
+  return (model.current_weekly_total_count ?? 0) > 0 ||
+    (model.current_weekly_usage_count ?? 0) > 0;
+}
+
+function selectPrimaryModel(models: ModelRemain[]): ModelRemain | undefined {
+  return models.find(hasCurrentQuotaData) ??
+    models.find(hasWeeklyQuotaData) ??
+    models[0];
+}
+
+function clampPercent(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.min(100, Math.max(0, value));
+}
+
+function percentFromCount(count: number | null, total: number | null): number | null {
+  if (count === null || total === null || total <= 0) {
+    return null;
+  }
+  return clampPercent((count / total) * 100);
+}
+
+function countsFromUsageField(
+  total: number,
+  usageCount: number,
+  semantics: "used" | "remaining",
+): { used: number; remaining: number } {
+  if (semantics === "remaining") {
+    return {
+      used: Math.max(total - usageCount, 0),
+      remaining: usageCount,
+    };
+  }
+
+  return {
+    used: usageCount,
+    remaining: Math.max(total - usageCount, 0),
+  };
+}
+
+function selectWeeklyRemainingPercent(models: ModelRemain[]): number | null {
+  const values = models
+    .map((model) => model.current_weekly_remaining_percent)
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value))
+    .map(clampPercent);
+
+  return values.length > 0 ? Math.min(...values) : null;
+}
+
 function buildUsageViewModel(result: RemainsResult): UsageViewModel {
   const strings = getRuntimeStrings();
   const payload = (result.raw ?? null) as MiniMaxRawPayload | null;
   const models = Array.isArray(payload?.model_remains) ? payload.model_remains : [];
-  const primaryModel = models[0];
+  const primaryModel = selectPrimaryModel(models);
   const statusLabel =
     result.summary ||
     payload?.status_msg ||
@@ -1726,25 +1819,47 @@ function buildUsageViewModel(result: RemainsResult): UsageViewModel {
       : buildErrorViewModel(result.summary, result.raw);
   }
 
+  const usageCountSemantics = result.usageCountSemantics;
   const totalCount = primaryModel.current_interval_total_count ?? 0;
-  const remainingCount = primaryModel.current_interval_usage_count ?? 0;
-  const usedCount = Math.max(totalCount - remainingCount, 0);
+  const currentCounts = countsFromUsageField(
+    totalCount,
+    primaryModel.current_interval_usage_count ?? 0,
+    usageCountSemantics,
+  );
+  const usedCount = currentCounts.used;
+  const remainingCount = currentCounts.remaining;
+  const remainingPercent = typeof primaryModel.current_interval_remaining_percent === "number"
+    ? clampPercent(primaryModel.current_interval_remaining_percent)
+    : percentFromCount(remainingCount, totalCount);
+  const usedPercent = remainingPercent !== null
+    ? clampPercent(100 - remainingPercent)
+    : (totalCount > 0 ? clampPercent((usedCount / totalCount) * 100) : 0);
   const weeklyTotalCount = primaryModel.current_weekly_total_count ?? 0;
-  const weeklyRemainingCount = primaryModel.current_weekly_usage_count ?? 0;
-  const weeklyUsedCount = Math.max(weeklyTotalCount - weeklyRemainingCount, 0);
-  const hasWeeklyQuota = weeklyTotalCount > 0 || weeklyRemainingCount > 0;
+  const weeklyCounts = countsFromUsageField(
+    weeklyTotalCount,
+    primaryModel.current_weekly_usage_count ?? 0,
+    usageCountSemantics,
+  );
+  const weeklyUsedCount = weeklyCounts.used;
+  const weeklyRemainingCount = weeklyCounts.remaining;
+  const weeklyRemainingPercent =
+    selectWeeklyRemainingPercent(models) ?? percentFromCount(weeklyRemainingCount, weeklyTotalCount);
+  const weeklyUsedPercent = weeklyRemainingPercent !== null
+    ? clampPercent(100 - weeklyRemainingPercent)
+    : (weeklyTotalCount > 0 ? clampPercent((weeklyUsedCount / weeklyTotalCount) * 100) : null);
+  const hasWeeklyQuota = weeklyTotalCount > 0 || weeklyRemainingCount > 0 || weeklyRemainingPercent !== null;
   const hasTimeWindow =
     typeof primaryModel.start_time === "number" && typeof primaryModel.end_time === "number";
 
   const filteredModels = models
-    .filter(
-      (model) =>
-        (model.current_interval_total_count ?? 0) !== 0 ||
-        (model.current_interval_usage_count ?? 0) !== 0,
-    )
+    .filter(hasCurrentQuotaData)
     .map((model) => {
       const modelTotalCount = model.current_interval_total_count ?? 0;
-      const modelRemainingCount = model.current_interval_usage_count ?? 0;
+      const modelCounts = countsFromUsageField(
+        modelTotalCount,
+        model.current_interval_usage_count ?? 0,
+        usageCountSemantics,
+      );
       return {
         name: model.model_name ?? strings.unknownModel,
         timeWindow:
@@ -1752,8 +1867,8 @@ function buildUsageViewModel(result: RemainsResult): UsageViewModel {
             ? `${formatTime(model.start_time)} ~ ${formatTime(model.end_time)}`
             : "",
         totalCount: modelTotalCount,
-        remainingCount: modelRemainingCount,
-        usedCount: Math.max(modelTotalCount - modelRemainingCount, 0),
+        remainingCount: modelCounts.remaining,
+        usedCount: modelCounts.used,
       };
     });
   const riskSourceModels = filteredModels.length > 0
@@ -1818,14 +1933,14 @@ function buildUsageViewModel(result: RemainsResult): UsageViewModel {
     remainingCount,
     minRemainingCount: minRemainingModel.remainingCount,
     usedCount,
-    usedPercent: totalCount > 0 ? Math.round((usedCount / totalCount) * 100) : 0,
+    usedPercent: Math.round(usedPercent),
+    remainingPercent: remainingPercent !== null ? Math.round(remainingPercent) : null,
     weeklyTotalCount: hasWeeklyQuota ? weeklyTotalCount : null,
     weeklyUsedCount: hasWeeklyQuota ? weeklyUsedCount : null,
     weeklyRemainingCount: hasWeeklyQuota ? weeklyRemainingCount : null,
-    weeklyUsedPercent:
-      hasWeeklyQuota && weeklyTotalCount > 0
-        ? Math.round((weeklyUsedCount / weeklyTotalCount) * 100)
-        : null,
+    weeklyUsedPercent: hasWeeklyQuota && weeklyUsedPercent !== null ? Math.round(weeklyUsedPercent) : null,
+    weeklyRemainingPercent:
+      hasWeeklyQuota && weeklyRemainingPercent !== null ? Math.round(weeklyRemainingPercent) : null,
     weeklyResetTimestamp:
       hasWeeklyQuota && typeof primaryModel.weekly_remains_time === "number"
         ? Date.now() + primaryModel.weekly_remains_time
@@ -1839,10 +1954,35 @@ function buildUsageViewModel(result: RemainsResult): UsageViewModel {
 }
 
 async function fetchRemains(apiKey: string, timeoutMs: number, endpoint?: string): Promise<RemainsResult> {
+  const tokenPlanResult = await fetchRemainsFromUrl(
+    apiKey,
+    timeoutMs,
+    getTokenPlanEndpointUrl(endpoint),
+    "used",
+  );
+  if (tokenPlanResult.ok) {
+    return tokenPlanResult;
+  }
+
+  const legacyResult = await fetchRemainsFromUrl(
+    apiKey,
+    timeoutMs,
+    getLegacyCodingPlanEndpointUrl(endpoint),
+    "remaining",
+  );
+  return legacyResult.ok ? legacyResult : tokenPlanResult;
+}
+
+async function fetchRemainsFromUrl(
+  apiKey: string,
+  timeoutMs: number,
+  url: string,
+  usageCountSemantics: "used" | "remaining",
+): Promise<RemainsResult> {
   const strings = getRuntimeStrings();
   try {
     const { statusCode, body } = await requestJson({
-      url: getEndpointUrl(endpoint),
+      url,
       headers: {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
@@ -1851,7 +1991,7 @@ async function fetchRemains(apiKey: string, timeoutMs: number, endpoint?: string
     });
 
     const payload = body as MiniMaxRawPayload;
-    return summarizeRemainsPayload(payload, statusCode);
+    return summarizeRemainsPayload(payload, statusCode, usageCountSemantics);
   } catch (error) {
     const message = error instanceof Error ? error.message : strings.fetchSummaryRequestFailed;
     return {
@@ -1859,6 +1999,7 @@ async function fetchRemains(apiKey: string, timeoutMs: number, endpoint?: string
       statusCode: null,
       summary: /timeout/i.test(message) ? strings.fetchSummaryTimeout : message,
       raw: null,
+      usageCountSemantics,
     };
   }
 }
@@ -1951,6 +2092,7 @@ function isMiniMaxRawPayload(value: unknown): value is MiniMaxRawPayload {
 function summarizeRemainsPayload(
   payload: MiniMaxRawPayload,
   fallbackStatusCode: number | null = null,
+  usageCountSemantics: "used" | "remaining" = "used",
 ): RemainsResult {
   const strings = getRuntimeStrings();
   const businessStatusCode = payload.status_code ?? payload.base_resp?.status_code ?? null;
@@ -1962,6 +2104,7 @@ function summarizeRemainsPayload(
       statusCode: businessStatusCode,
       summary: strings.fetchSummarySuccess,
       raw: payload,
+      usageCountSemantics,
     };
   }
 
@@ -1971,6 +2114,7 @@ function summarizeRemainsPayload(
       statusCode: businessStatusCode,
       summary: strings.fetchSummaryCheckApiKey,
       raw: payload,
+      usageCountSemantics,
     };
   }
 
@@ -1980,6 +2124,7 @@ function summarizeRemainsPayload(
       statusCode: fallbackStatusCode,
       summary: `HTTP ${fallbackStatusCode}`,
       raw: payload,
+      usageCountSemantics,
     };
   }
 
@@ -1988,6 +2133,7 @@ function summarizeRemainsPayload(
     statusCode: businessStatusCode ?? fallbackStatusCode,
     summary: businessStatusMessage || strings.fetchSummaryUnknownResponse,
     raw: payload,
+    usageCountSemantics,
   };
 }
 

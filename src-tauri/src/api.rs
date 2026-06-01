@@ -44,17 +44,38 @@ struct ModelRemain {
     current_interval_total_count: Option<i64>,
     #[serde(rename = "current_interval_usage_count")]
     current_interval_usage_count: Option<i64>,
+    #[serde(rename = "current_interval_remaining_percent")]
+    current_interval_remaining_percent: Option<f64>,
     #[serde(rename = "model_name")]
     model_name: Option<String>,
     #[serde(rename = "current_weekly_total_count")]
     current_weekly_total_count: Option<i64>,
     #[serde(rename = "current_weekly_usage_count")]
     current_weekly_usage_count: Option<i64>,
+    #[serde(rename = "current_weekly_remaining_percent")]
+    current_weekly_remaining_percent: Option<f64>,
     #[serde(rename = "weekly_remains_time")]
     weekly_remains_time: Option<i64>,
 }
 
-fn resolve_endpoint(endpoint: &str) -> String {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UsageCountSemantics {
+    Used,
+    Remaining,
+}
+
+fn resolve_endpoint_base(endpoint: &str) -> &'static str {
+    match endpoint {
+        "overseas" => "https://www.minimax.io",
+        _ => "https://www.minimaxi.com",
+    }
+}
+
+fn resolve_token_plan_endpoint(endpoint: &str) -> String {
+    format!("{}/v1/token_plan/remains", resolve_endpoint_base(endpoint))
+}
+
+fn resolve_legacy_coding_plan_endpoint(endpoint: &str) -> String {
     let base = match endpoint {
         "overseas" => "https://platform.minimax.io",
         _ => "https://www.minimaxi.com",
@@ -68,24 +89,34 @@ pub async fn fetch_minimax_usage(
     endpoint: &str,
 ) -> Result<UsageData, Box<dyn std::error::Error + Send + Sync>> {
     let api_key = api_key.to_string();
-    let url = resolve_endpoint(endpoint);
-    let payload = tokio::task::spawn_blocking(move || {
-        fetch_minimax_payload_blocking(&api_key, timeout_ms, &url)
+    let token_plan_url = resolve_token_plan_endpoint(endpoint);
+    let legacy_url = resolve_legacy_coding_plan_endpoint(endpoint);
+    let (payload, semantics) = tokio::task::spawn_blocking(move || {
+        fetch_minimax_payload_blocking_with_compat(&api_key, timeout_ms, &token_plan_url, &legacy_url)
     })
     .await
     .map_err(|e| format!("MiniMax request task failed: {}", e))??;
 
-    let business_status_code = payload
-        .status_code
-        .or(payload.base_resp.as_ref().and_then(|b| b.status_code))
-        .unwrap_or(0);
+    Ok(build_usage_data_from_payload(
+        payload,
+        Local::now(),
+        semantics,
+    ))
+}
+
+fn build_usage_data_from_payload(
+    mut payload: MiniMaxResponse,
+    now: DateTime<Local>,
+    semantics: UsageCountSemantics,
+) -> UsageData {
+    let business_status_code = business_status_code(&payload).unwrap_or(0);
 
     if business_status_code != 0 {
         let msg = payload
             .status_msg
             .or(payload.base_resp.and_then(|b| b.status_msg))
             .unwrap_or_else(|| "Unknown error".to_string());
-        return Ok(UsageData {
+        return UsageData {
             ok: false,
             status_label: msg,
             primary_model_name: String::new(),
@@ -96,50 +127,50 @@ pub async fn fetch_minimax_usage(
             remaining_count: None,
             used_count: None,
             used_percent: None,
+            remaining_percent: None,
             weekly_total_count: None,
             weekly_used_count: None,
             weekly_remaining_count: None,
             weekly_used_percent: None,
+            weekly_remaining_percent: None,
             weekly_reset_timestamp: None,
             weekly_reset_in_label: String::new(),
             interval_label: String::new(),
             models: vec![],
-            last_updated: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-        });
+            last_updated: now.format("%Y-%m-%d %H:%M:%S").to_string(),
+        };
     }
 
-    let models = payload.model_remains.unwrap_or_default();
-    let primary = models.first();
+    let models = payload.model_remains.take().unwrap_or_default();
+    let primary = select_primary_model(&models);
 
     let (total_count, remaining_count, used_count, used_percent) = if let Some(m) = primary {
-        let total = m.current_interval_total_count.unwrap_or(0);
-        let remaining = m.current_interval_usage_count.unwrap_or(0);
-        let used = total.saturating_sub(remaining);
-        let percent = if total > 0 {
-            (used as f64 / total as f64) * 100.0
-        } else {
-            0.0
-        };
+        let (total, used, remaining) = current_counts(m, semantics);
+        let percent = used_percent_from_counts(total, used);
         (Some(total), Some(remaining), Some(used), Some(percent))
     } else {
         (None, None, None, None)
     };
+
+    let remaining_percent = primary.and_then(|m| {
+        m.current_interval_remaining_percent
+            .map(clamp_percent)
+            .or_else(|| percent_from_count_pair(remaining_count, total_count))
+    });
 
     let (weekly_total, weekly_remaining, weekly_used, weekly_percent) = if let Some(m) = primary {
-        let total = m.current_weekly_total_count.unwrap_or(0);
-        let remaining = m.current_weekly_usage_count.unwrap_or(0);
-        let used = total.saturating_sub(remaining);
-        let percent = if total > 0 {
-            (used as f64 / total as f64) * 100.0
-        } else {
-            0.0
-        };
+        let (total, used, remaining) = weekly_counts(m, semantics);
+        let percent = used_percent_from_counts(total, used);
         (Some(total), Some(remaining), Some(used), Some(percent))
     } else {
         (None, None, None, None)
     };
 
-    let now = Local::now();
+    let weekly_remaining_percent = select_weekly_remaining_percent(&models)
+        .or_else(|| percent_from_count_pair(weekly_remaining, weekly_total));
+    let weekly_percent = weekly_remaining_percent
+        .map(|remaining| clamp_percent(100.0 - remaining))
+        .or(weekly_percent);
 
     let (reset_timestamp, reset_in_label) = if let Some(m) = primary {
         if let Some(rt) = m.remains_time {
@@ -188,15 +219,9 @@ pub async fn fetch_minimax_usage(
 
     let model_details: Vec<ModelDetail> = models
         .iter()
-        .filter(|m| {
-            let total = m.current_interval_total_count.unwrap_or(0);
-            let used = m.current_interval_usage_count.unwrap_or(0);
-            total > 0 || used > 0
-        })
+        .filter(|m| has_current_quota_data(m))
         .map(|m| {
-            let total = m.current_interval_total_count.unwrap_or(0);
-            let remaining = m.current_interval_usage_count.unwrap_or(0);
-            let used = total.saturating_sub(remaining);
+            let (total, used, remaining) = current_counts(m, semantics);
             let (time_window, _) = match (m.start_time, m.end_time) {
                 (Some(start), Some(end)) => {
                     let start_dt = DateTime::from_timestamp(start / 1000, 0)
@@ -223,7 +248,7 @@ pub async fn fetch_minimax_usage(
         })
         .collect();
 
-    Ok(UsageData {
+    UsageData {
         ok: true,
         status_label: "Success".to_string(),
         primary_model_name: primary
@@ -236,16 +261,127 @@ pub async fn fetch_minimax_usage(
         remaining_count,
         used_count,
         used_percent,
+        remaining_percent,
         weekly_total_count: weekly_total.filter(|&v| v > 0),
         weekly_used_count: weekly_used,
         weekly_remaining_count: weekly_remaining,
         weekly_used_percent: weekly_percent.filter(|&v| v.is_finite()),
+        weekly_remaining_percent,
         weekly_reset_timestamp,
         weekly_reset_in_label,
         interval_label,
         models: model_details,
         last_updated: now.format("%Y-%m-%d %H:%M:%S").to_string(),
-    })
+    }
+}
+
+fn select_primary_model(models: &[ModelRemain]) -> Option<&ModelRemain> {
+    models
+        .iter()
+        .find(|m| has_current_quota_data(m))
+        .or_else(|| models.iter().find(|m| has_weekly_quota_data(m)))
+        .or_else(|| models.first())
+}
+
+fn has_current_quota_data(model: &ModelRemain) -> bool {
+    model.current_interval_total_count.unwrap_or(0) > 0
+        || model.current_interval_usage_count.unwrap_or(0) > 0
+}
+
+fn has_weekly_quota_data(model: &ModelRemain) -> bool {
+    model.current_weekly_total_count.unwrap_or(0) > 0
+        || model.current_weekly_usage_count.unwrap_or(0) > 0
+}
+
+fn current_counts(model: &ModelRemain, semantics: UsageCountSemantics) -> (i64, i64, i64) {
+    usage_counts(
+        model.current_interval_total_count.unwrap_or(0),
+        model.current_interval_usage_count.unwrap_or(0),
+        semantics,
+    )
+}
+
+fn weekly_counts(model: &ModelRemain, semantics: UsageCountSemantics) -> (i64, i64, i64) {
+    usage_counts(
+        model.current_weekly_total_count.unwrap_or(0),
+        model.current_weekly_usage_count.unwrap_or(0),
+        semantics,
+    )
+}
+
+fn usage_counts(total: i64, usage_count: i64, semantics: UsageCountSemantics) -> (i64, i64, i64) {
+    match semantics {
+        UsageCountSemantics::Used => (total, usage_count, total.saturating_sub(usage_count)),
+        UsageCountSemantics::Remaining => (total, total.saturating_sub(usage_count), usage_count),
+    }
+}
+
+fn used_percent_from_counts(total: i64, used: i64) -> f64 {
+    if total > 0 {
+        (used as f64 / total as f64) * 100.0
+    } else {
+        0.0
+    }
+}
+
+fn percent_from_count_pair(count: Option<i64>, total: Option<i64>) -> Option<f64> {
+    match (count, total) {
+        (Some(count), Some(total)) if total > 0 => {
+            Some(clamp_percent((count as f64 / total as f64) * 100.0))
+        }
+        _ => None,
+    }
+}
+
+fn clamp_percent(percent: f64) -> f64 {
+    if !percent.is_finite() {
+        return 0.0;
+    }
+    percent.clamp(0.0, 100.0)
+}
+
+fn select_weekly_remaining_percent(models: &[ModelRemain]) -> Option<f64> {
+    models
+        .iter()
+        .filter_map(|m| m.current_weekly_remaining_percent.map(clamp_percent))
+        .reduce(f64::min)
+}
+
+fn business_status_code(payload: &MiniMaxResponse) -> Option<i32> {
+    payload
+        .status_code
+        .or(payload.base_resp.as_ref().and_then(|b| b.status_code))
+}
+
+fn is_business_success(payload: &MiniMaxResponse) -> bool {
+    business_status_code(payload).unwrap_or(0) == 0
+}
+
+fn fetch_minimax_payload_blocking_with_compat(
+    api_key: &str,
+    timeout_ms: u64,
+    token_plan_url: &str,
+    legacy_url: &str,
+) -> Result<(MiniMaxResponse, UsageCountSemantics), Box<dyn std::error::Error + Send + Sync>> {
+    match fetch_minimax_payload_blocking(api_key, timeout_ms, token_plan_url) {
+        Ok(payload) if is_business_success(&payload) => Ok((payload, UsageCountSemantics::Used)),
+        Ok(primary_error_payload) => {
+            match fetch_minimax_payload_blocking(api_key, timeout_ms, legacy_url) {
+                Ok(legacy_payload) if is_business_success(&legacy_payload) => {
+                    Ok((legacy_payload, UsageCountSemantics::Remaining))
+                }
+                _ => Ok((primary_error_payload, UsageCountSemantics::Used)),
+            }
+        }
+        Err(primary_error) => match fetch_minimax_payload_blocking(api_key, timeout_ms, legacy_url) {
+            Ok(legacy_payload) => Ok((legacy_payload, UsageCountSemantics::Remaining)),
+            Err(legacy_error) => Err(format!(
+                "{}; legacy coding_plan endpoint failed: {}",
+                primary_error, legacy_error
+            )
+            .into()),
+        },
+    }
 }
 
 fn fetch_minimax_payload_blocking(
@@ -464,5 +600,142 @@ fn format_english_duration(total_seconds: i64) -> String {
         format!("{}h", hours)
     } else {
         format!("{}m", minutes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn make_model(
+        name: &str,
+        current_total: i64,
+        current_used: i64,
+        weekly_total: i64,
+        weekly_used: i64,
+    ) -> ModelRemain {
+        ModelRemain {
+            start_time: Some(1_780_243_200_000),
+            end_time: Some(1_780_329_600_000),
+            remains_time: Some(37_518_794),
+            current_interval_total_count: Some(current_total),
+            current_interval_usage_count: Some(current_used),
+            current_interval_remaining_percent: None,
+            model_name: Some(name.to_string()),
+            current_weekly_total_count: Some(weekly_total),
+            current_weekly_usage_count: Some(weekly_used),
+            current_weekly_remaining_percent: None,
+            weekly_remains_time: Some(555_918_794),
+        }
+    }
+
+    #[test]
+    fn select_primary_model_skips_empty_leading_model() {
+        let models = vec![make_model("general", 0, 0, 0, 0), make_model("video", 3, 0, 21, 0)];
+
+        let primary = select_primary_model(&models).expect("primary model");
+
+        assert_eq!(primary.model_name.as_deref(), Some("video"));
+    }
+
+    #[test]
+    fn payload_mapping_uses_non_empty_primary_model() {
+        let payload = MiniMaxResponse {
+            base_resp: Some(BaseResp {
+                status_code: Some(0),
+                status_msg: Some("success".to_string()),
+            }),
+            status_code: None,
+            status_msg: None,
+            model_remains: Some(vec![
+                make_model("general", 0, 0, 0, 0),
+                make_model("video", 3, 0, 21, 0),
+            ]),
+        };
+        let now = Local.with_ymd_and_hms(2026, 6, 1, 13, 40, 0).unwrap();
+
+        let usage = build_usage_data_from_payload(payload, now, UsageCountSemantics::Used);
+
+        assert!(usage.ok);
+        assert_eq!(usage.primary_model_name, "video");
+        assert_eq!(usage.total_count, Some(3));
+        assert_eq!(usage.remaining_count, Some(3));
+        assert_eq!(usage.used_count, Some(0));
+        assert_eq!(usage.weekly_total_count, Some(21));
+        assert_eq!(usage.weekly_remaining_count, Some(21));
+        assert_eq!(usage.weekly_used_count, Some(0));
+        assert_eq!(usage.models.len(), 1);
+        assert_eq!(usage.models[0].name, "video");
+    }
+
+    #[test]
+    fn payload_mapping_treats_usage_count_as_used_count() {
+        let payload = MiniMaxResponse {
+            base_resp: Some(BaseResp {
+                status_code: Some(0),
+                status_msg: Some("success".to_string()),
+            }),
+            status_code: None,
+            status_msg: None,
+            model_remains: Some(vec![make_model("video", 10, 4, 21, 5)]),
+        };
+        let now = Local.with_ymd_and_hms(2026, 6, 1, 13, 40, 0).unwrap();
+
+        let usage = build_usage_data_from_payload(payload, now, UsageCountSemantics::Used);
+
+        assert_eq!(usage.total_count, Some(10));
+        assert_eq!(usage.used_count, Some(4));
+        assert_eq!(usage.remaining_count, Some(6));
+        assert_eq!(usage.used_percent, Some(40.0));
+        assert_eq!(usage.weekly_total_count, Some(21));
+        assert_eq!(usage.weekly_used_count, Some(5));
+        assert_eq!(usage.weekly_remaining_count, Some(16));
+    }
+
+    #[test]
+    fn payload_mapping_keeps_legacy_remaining_count_semantics() {
+        let payload = MiniMaxResponse {
+            base_resp: Some(BaseResp {
+                status_code: Some(0),
+                status_msg: Some("success".to_string()),
+            }),
+            status_code: None,
+            status_msg: None,
+            model_remains: Some(vec![make_model("video", 10, 6, 21, 16)]),
+        };
+        let now = Local.with_ymd_and_hms(2026, 6, 1, 13, 40, 0).unwrap();
+
+        let usage = build_usage_data_from_payload(payload, now, UsageCountSemantics::Remaining);
+
+        assert_eq!(usage.total_count, Some(10));
+        assert_eq!(usage.used_count, Some(4));
+        assert_eq!(usage.remaining_count, Some(6));
+        assert_eq!(usage.weekly_used_count, Some(5));
+        assert_eq!(usage.weekly_remaining_count, Some(16));
+    }
+
+    #[test]
+    fn payload_mapping_uses_weekly_remaining_percent_from_any_model() {
+        let mut plan_model = make_model("general", 0, 0, 0, 0);
+        plan_model.current_weekly_remaining_percent = Some(89.0);
+        let mut video_model = make_model("video", 3, 0, 21, 0);
+        video_model.current_weekly_remaining_percent = Some(100.0);
+        let payload = MiniMaxResponse {
+            base_resp: Some(BaseResp {
+                status_code: Some(0),
+                status_msg: Some("success".to_string()),
+            }),
+            status_code: None,
+            status_msg: None,
+            model_remains: Some(vec![plan_model, video_model]),
+        };
+        let now = Local.with_ymd_and_hms(2026, 6, 1, 13, 40, 0).unwrap();
+
+        let usage = build_usage_data_from_payload(payload, now, UsageCountSemantics::Used);
+
+        assert_eq!(usage.primary_model_name, "video");
+        assert_eq!(usage.weekly_remaining_percent, Some(89.0));
+        assert_eq!(usage.weekly_used_percent, Some(11.0));
     }
 }

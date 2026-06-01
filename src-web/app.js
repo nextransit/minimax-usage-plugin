@@ -234,7 +234,7 @@ const i18n = {
     used: '已使用',
     left: '剩余量',
     total: '总额度',
-    weeklyQuota: '本周进度',
+    weeklyQuota: '周剩余额度',
     modelDetails: '模型明细',
     topItems: '前',
     itemsSuffix: '项',
@@ -341,7 +341,7 @@ const i18n = {
     used: 'USED',
     left: 'LEFT',
     total: 'TOTAL',
-    weeklyQuota: 'WEEKLY QUOTA',
+    weeklyQuota: 'WEEKLY REMAINING',
     modelDetails: 'MODEL DETAILS',
     topItems: 'TOP',
     itemsSuffix: 'ITEMS',
@@ -859,10 +859,12 @@ function makeErrorUsageData(message) {
     remaining_count: null,
     used_count: null,
     used_percent: null,
+    remaining_percent: null,
     weekly_total_count: null,
     weekly_used_count: null,
     weekly_remaining_count: null,
     weekly_used_percent: null,
+    weekly_remaining_percent: null,
     weekly_reset_timestamp: null,
     weekly_reset_in_label: '',
     interval_label: '',
@@ -1249,8 +1251,10 @@ function renderAggregateView() {
   }
 
   // WEEKLY aggregate
-  const weeklyPercent = m.weeklyTotal > 0 ? clampPercent((m.weeklyUsed / m.weeklyTotal) * 100) : 0;
-  const weeklyStatus = getStatus(weeklyPercent);
+  const weeklyPercent = typeof m.weeklyRemainingPercent === 'number'
+    ? clampPercent(m.weeklyRemainingPercent)
+    : (m.weeklyTotal > 0 ? clampPercent((m.weeklyRemaining / m.weeklyTotal) * 100) : 0);
+  const weeklyStatus = getRemainingStatus(weeklyPercent);
   setText('weekly-used', formatNumber(m.weeklyUsed));
   setFlipNumber('weekly-remaining-container', 'weekly-remaining', formatNumber(m.weeklyRemaining));
   setText('weekly-total', formatNumber(m.weeklyTotal));
@@ -1328,7 +1332,7 @@ function renderKeyDetailCard(key) {
   const color = safeKeyColor(key.color);
   const data = state.usageData[key.id];
   const currentPct = percentFromUsage(data, 'used_count', 'total_count', 'used_percent');
-  const weeklyPct = percentFromUsage(data, 'weekly_used_count', 'weekly_total_count', 'weekly_used_percent');
+  const weeklyPct = percentFromRemaining(data, 'weekly_remaining_count', 'weekly_total_count', 'weekly_remaining_percent');
   const isHidden = key.is_active === false;
   const isLoading = state.pendingRefreshKeyIds.has(key.id);
   console.log('[renderKeyDetailCard]', key.id, 'currentPct:', currentPct, 'weeklyPct:', weeklyPct, 'isLoading:', isLoading, 'dataKeys:', data ? Object.keys(data).filter(k => k.includes('count') || k.includes('percent')) : 'NO_DATA');
@@ -1337,7 +1341,7 @@ function renderKeyDetailCard(key) {
   const confirmingDelete = state.deleteConfirmKeyId === key.id;
 
   const currentStatus = data && data.ok ? getStatus(currentPct) : 'normal';
-  const weeklyStatus = data && data.ok ? getStatus(weeklyPct) : 'normal';
+  const weeklyStatus = data && data.ok ? getRemainingStatus(weeklyPct) : 'normal';
 
   const refreshSec = Math.max(1, Number(key.refresh_interval) || 20);
   const subtitle = data && data.ok
@@ -1440,7 +1444,7 @@ function renderKeyDetailCard(key) {
         </div>
         ${errorBlock}
         ${metricRow(t('currentInterval'), currentPct, currentStatus, data?.used_count, data?.total_count, data?.reset_timestamp, 'current')}
-        ${metricRow(t('weeklyAggregate'), weeklyPct, weeklyStatus, data?.weekly_used_count, data?.weekly_total_count, data?.weekly_reset_timestamp, 'weekly')}
+        ${metricRow(t('weeklyQuota'), weeklyPct, weeklyStatus, data?.weekly_remaining_count, data?.weekly_total_count, data?.weekly_reset_timestamp, 'weekly')}
         ${expandBlock}
       </div>
       ${confirmBubble}
@@ -1502,8 +1506,8 @@ function renderSingleKeyView(keyId) {
     setElementAttr(document.getElementById('window-countdown'), 'data-timestamp', data.reset_timestamp);
   }
 
-  const weeklyPercent = percentFromUsage(data, 'weekly_used_count', 'weekly_total_count', 'weekly_used_percent');
-  const weeklyStatus = data && data.ok ? getStatus(weeklyPercent) : 'normal';
+  const weeklyPercent = percentFromRemaining(data, 'weekly_remaining_count', 'weekly_total_count', 'weekly_remaining_percent');
+  const weeklyStatus = data && data.ok ? getRemainingStatus(weeklyPercent) : 'normal';
 
   setText('weekly-used', data && data.ok ? formatNumber(data.weekly_used_count) : '—');
   setFlipNumber('weekly-remaining-container', 'weekly-remaining', data && data.ok ? formatNumber(data.weekly_remaining_count) : '—');
@@ -1913,6 +1917,7 @@ function getAggregateMetrics() {
   const totals = {
     used: 0, remaining: 0, total: 0,
     weeklyUsed: 0, weeklyRemaining: 0, weeklyTotal: 0,
+    weeklyRemainingPercent: null,
     earliestReset: 0, earliestWeeklyReset: 0,
     primaryModel: '', intervalLabel: '',
     hasData: false,
@@ -1927,6 +1932,12 @@ function getAggregateMetrics() {
     totals.weeklyUsed += data.weekly_used_count || 0;
     totals.weeklyRemaining += data.weekly_remaining_count || 0;
     totals.weeklyTotal += data.weekly_total_count || 0;
+    if (typeof data.weekly_remaining_percent === 'number' && Number.isFinite(data.weekly_remaining_percent)) {
+      const pct = clampPercent(data.weekly_remaining_percent);
+      totals.weeklyRemainingPercent = totals.weeklyRemainingPercent === null
+        ? pct
+        : Math.min(totals.weeklyRemainingPercent, pct);
+    }
     if (data.reset_timestamp && (totals.earliestReset === 0 || data.reset_timestamp < totals.earliestReset)) {
       totals.earliestReset = data.reset_timestamp;
     }
@@ -1962,25 +1973,43 @@ function percentFromUsage(data, usedField, totalField, percentField) {
   return clampPercent((used / total) * 100);
 }
 
+function percentFromRemaining(data, remainingField, totalField, percentField) {
+  if (!data || !data.ok) return 0;
+  const reportedPercent = data[percentField];
+  if (typeof reportedPercent === 'number' && Number.isFinite(reportedPercent)) {
+    return clampPercent(reportedPercent);
+  }
+
+  const remaining = data[remainingField];
+  const total = data[totalField];
+  if (typeof remaining !== 'number' || typeof total !== 'number' || total <= 0) {
+    return 0;
+  }
+  return clampPercent((remaining / total) * 100);
+}
+
 function getQuotaRiskCandidates(data) {
   if (!data || !data.ok) return [];
 
   const candidates = [];
-  const addCandidate = (remaining, total, kind) => {
+  const addCandidate = (remaining, total, kind, remainingPercent = null) => {
     if (typeof remaining !== 'number' || typeof total !== 'number' || total <= 0) {
       return;
     }
     const normalizedRemaining = Math.max(0, remaining);
+    const remainingRatio = typeof remainingPercent === 'number' && Number.isFinite(remainingPercent)
+      ? clampPercent(remainingPercent) / 100
+      : normalizedRemaining / total;
     candidates.push({
       remaining: normalizedRemaining,
       total,
-      remainingRatio: normalizedRemaining / total,
+      remainingRatio,
       kind,
     });
   };
 
   addCandidate(data.remaining_count, data.total_count, 'current');
-  addCandidate(data.weekly_remaining_count, data.weekly_total_count, 'weekly');
+  addCandidate(data.weekly_remaining_count, data.weekly_total_count, 'weekly', data.weekly_remaining_percent);
 
   return candidates;
 }
@@ -2064,6 +2093,12 @@ function clampPercent(value) {
 function getStatus(percent) {
   if (percent >= 90) return 'critical';
   if (percent >= 70) return 'warning';
+  return 'normal';
+}
+
+function getRemainingStatus(percent) {
+  if (percent <= 10) return 'critical';
+  if (percent <= 30) return 'warning';
   return 'normal';
 }
 
