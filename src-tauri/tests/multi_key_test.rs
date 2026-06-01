@@ -22,8 +22,11 @@ fn test_api_key_entry_fields() {
         keychain_service: "com.decard.minimax".to_string(),
         keychain_account: "account-1".to_string(),
         refresh_interval: 20,
+        current_quota_count: 1500,
+        weekly_quota_count: 15000,
         created_at: 1234567890,
         is_active: true,
+        endpoint: "domestic".to_string(),
     };
 
     assert_eq!(entry.name, "My API Key");
@@ -42,8 +45,11 @@ fn test_api_key_entry_unique_ids() {
         keychain_service: "com.decard.test".to_string(),
         keychain_account: uuid::Uuid::new_v4().to_string(),
         refresh_interval: 20,
+        current_quota_count: 1500,
+        weekly_quota_count: 15000,
         created_at: chrono::Utc::now().timestamp(),
         is_active: true,
+        endpoint: "domestic".to_string(),
     };
 
     let entry2 = ApiKeyEntry {
@@ -53,8 +59,11 @@ fn test_api_key_entry_unique_ids() {
         keychain_service: "com.decard.test".to_string(),
         keychain_account: uuid::Uuid::new_v4().to_string(),
         refresh_interval: 30,
+        current_quota_count: 1500,
+        weekly_quota_count: 15000,
         created_at: chrono::Utc::now().timestamp(),
         is_active: true,
+        endpoint: "domestic".to_string(),
     };
 
     assert_ne!(entry1.id, entry2.id);
@@ -72,8 +81,11 @@ fn test_api_key_entry_serialization() {
         keychain_service: "com.decard.test".to_string(),
         keychain_account: "test-account".to_string(),
         refresh_interval: 20,
+        current_quota_count: 1500,
+        weekly_quota_count: 15000,
         created_at: 1234567890,
         is_active: true,
+        endpoint: "domestic".to_string(),
     };
 
     let json = serde_json::to_string(&entry).expect("Should serialize");
@@ -100,8 +112,11 @@ fn test_multiple_entries_in_vec() {
             keychain_service: "com.decard.test".to_string(),
             keychain_account: uuid::Uuid::new_v4().to_string(),
             refresh_interval: 10 + i * 10,
+            current_quota_count: 1500,
+            weekly_quota_count: 15000,
             created_at: chrono::Utc::now().timestamp(),
             is_active: true,
+            endpoint: "domestic".to_string(),
         });
     }
 

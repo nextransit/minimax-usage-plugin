@@ -29,6 +29,10 @@ struct AppConfigV1 {
     #[serde(default = "default_true")]
     pub show_percent_in_tray: bool,
     pub detail_model_limit: u32,
+    #[serde(default = "default_current_quota_count")]
+    pub current_quota_count: i64,
+    #[serde(default = "default_weekly_quota_count")]
+    pub weekly_quota_count: i64,
     pub language: String,
     #[serde(default = "default_true")]
     pub first_run: bool,
@@ -40,6 +44,14 @@ struct AppConfigV1 {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_current_quota_count() -> i64 {
+    1500
+}
+
+fn default_weekly_quota_count() -> i64 {
+    15000
 }
 
 pub fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
@@ -90,6 +102,8 @@ pub fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
         show_weekly_in_status: v1_config.show_weekly_in_status,
         show_percent_in_tray: v1_config.show_percent_in_tray,
         detail_model_limit: v1_config.detail_model_limit,
+        current_quota_count: v1_config.current_quota_count,
+        weekly_quota_count: v1_config.weekly_quota_count,
         language: v1_config.language,
         first_run: v1_config.first_run,
         start_minimized: v1_config.start_minimized,
@@ -126,6 +140,8 @@ fn migrate_v1_to_v2(config: &mut AppConfig) -> bool {
                 keychain_service: "com.decard.minimax-monitor.keys".to_string(),
                 keychain_account: Uuid::new_v4().to_string(),
                 refresh_interval: config.refresh_interval_seconds,
+                current_quota_count: config.current_quota_count,
+                weekly_quota_count: config.weekly_quota_count,
                 created_at: chrono::Utc::now().timestamp(),
                 is_active: true,
                 endpoint: "domestic".to_string(),

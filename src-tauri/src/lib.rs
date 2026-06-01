@@ -145,17 +145,29 @@ async fn refresh_usage_data(
     }
 
     log::info!("Fetching usage data for key {} ({})", key_id, reason);
-    let endpoint = {
+    let (endpoint, current_quota_count, weekly_quota_count) = {
         let state: tauri::State<AppState> = app_h.state();
         let config = state.config.lock().unwrap();
-        config
-            .api_keys
-            .iter()
-            .find(|e| e.id == key_id)
-            .map(|e| e.endpoint.clone())
-            .unwrap_or_else(|| "domestic".to_string())
+        if let Some(entry) = config.api_keys.iter().find(|e| e.id == key_id) {
+            (
+                entry.endpoint.clone(),
+                entry.current_quota_count,
+                entry.weekly_quota_count,
+            )
+        } else {
+            (
+                "domestic".to_string(),
+                config.current_quota_count,
+                config.weekly_quota_count,
+            )
+        }
     };
-    let fetch_result = api::fetch_minimax_usage(&api_key, API_FETCH_TIMEOUT_MS, &endpoint).await;
+    let fetch_result = api::fetch_minimax_usage(&api_key, API_FETCH_TIMEOUT_MS, &endpoint)
+        .await
+        .map(|mut data| {
+            api::apply_configured_quota_counts(&mut data, current_quota_count, weekly_quota_count);
+            data
+        });
 
     {
         let state: tauri::State<AppState> = app_h.state();

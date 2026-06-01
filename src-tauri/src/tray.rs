@@ -215,6 +215,7 @@ impl SummaryUsageData {
         let mut weekly_total_count = 0i64;
         let mut weekly_remaining_count = 0i64;
         let mut weekly_used_count = 0i64;
+        let mut max_used_percent: Option<f64> = None;
         let mut min_weekly_remaining_percent: Option<f64> = None;
         let mut has_any_data = false;
 
@@ -233,6 +234,13 @@ impl SummaryUsageData {
                     }
                     if let Some(cnt) = data.used_count {
                         used_count += cnt;
+                    }
+                    if let Some(pct) = data.used_percent {
+                        max_used_percent = Some(
+                            max_used_percent
+                                .map(|current| current.max(pct))
+                                .unwrap_or(pct),
+                        );
                     }
                     // 累计周度数据
                     if let Some(cnt) = data.weekly_total_count {
@@ -264,7 +272,7 @@ impl SummaryUsageData {
             summary.used_count = Some(used_count);
             summary.used_percent = Some((used_count as f64 / total_count as f64) * 100.0);
         } else if has_any_data {
-            summary.used_percent = Some(0.0);
+            summary.used_percent = max_used_percent.or(Some(0.0));
         }
 
         if weekly_total_count > 0 {
@@ -499,14 +507,9 @@ pub fn update_tray_menu(app: &AppHandle, state: &AppState) {
                     .unwrap_or_else(|| {
                         format!("{}: {}", i18n.weekly_remaining_prefix, weekly_remaining)
                     });
-                let weekly_item = MenuItem::with_id(
-                    app,
-                    "weekly_remaining",
-                    weekly_label,
-                    false,
-                    None::<&str>,
-                )
-                .unwrap();
+                let weekly_item =
+                    MenuItem::with_id(app, "weekly_remaining", weekly_label, false, None::<&str>)
+                        .unwrap();
                 items.insert(5, Box::new(weekly_item));
             }
 
@@ -671,7 +674,7 @@ pub fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
                 }
                 "refresh" => {
                     // Multi-key refresh: iterate over all active keys
-                    let keys_to_fetch: Vec<(String, String, String)> = {
+                    let keys_to_fetch: Vec<(String, String, String, i64, i64)> = {
                         let state: State<AppState> = app.state();
                         let config = state.config.lock().unwrap();
                         config
@@ -679,19 +682,33 @@ pub fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
                             .iter()
                             .filter(|e| e.is_active)
                             .filter_map(|e| {
-                                crate::api_key_store::load_key_for_entry(e)
-                                    .map(|key| (e.id.clone(), key, e.endpoint.clone()))
+                                crate::api_key_store::load_key_for_entry(e).map(|key| {
+                                    (
+                                        e.id.clone(),
+                                        key,
+                                        e.endpoint.clone(),
+                                        e.current_quota_count,
+                                        e.weekly_quota_count,
+                                    )
+                                })
                             })
                             .collect()
                     };
 
-                    for (key_id, api_key, endpoint) in keys_to_fetch {
+                    for (key_id, api_key, endpoint, current_quota_count, weekly_quota_count) in
+                        keys_to_fetch
+                    {
                         let app_h_clone = app_h.clone();
                         let key_id_clone = key_id.clone();
                         tauri::async_runtime::spawn(async move {
                             match crate::api::fetch_minimax_usage(&api_key, 15000, &endpoint).await
                             {
-                                Ok(data) => {
+                                Ok(mut data) => {
+                                    crate::api::apply_configured_quota_counts(
+                                        &mut data,
+                                        current_quota_count,
+                                        weekly_quota_count,
+                                    );
                                     let state: State<AppState> = app_h_clone.state();
                                     {
                                         let mut usage = state.usage_data.lock().unwrap();
@@ -800,6 +817,8 @@ mod tests {
             keychain_service: "svc".to_string(),
             keychain_account: "acct".to_string(),
             refresh_interval: 20,
+            current_quota_count: 1500,
+            weekly_quota_count: 15000,
             created_at: 0,
             is_active: true,
             endpoint: "domestic".to_string(),
@@ -842,7 +861,10 @@ mod tests {
         let summary = SummaryUsageData::from_usage_map(&config, &usage);
 
         assert_eq!(summary.weekly_remaining_percent, Some(89.0));
-        assert_eq!(format_summary_tray_usage(&summary).as_deref(), Some("0%/89%"));
+        assert_eq!(
+            format_summary_tray_usage(&summary).as_deref(),
+            Some("0%/89%")
+        );
     }
 
     #[test]
@@ -857,6 +879,9 @@ mod tests {
 
         let summary = SummaryUsageData::from_usage_map(&config, &usage);
 
-        assert_eq!(format_summary_tray_usage(&summary).as_deref(), Some("0%/76%"));
+        assert_eq!(
+            format_summary_tray_usage(&summary).as_deref(),
+            Some("0%/76%")
+        );
     }
 }

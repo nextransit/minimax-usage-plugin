@@ -41,10 +41,16 @@ type ModelRemain = {
   current_interval_total_count?: number;
   current_interval_usage_count?: number;
   current_interval_remaining_percent?: number;
+  current_total?: number;
+  current_usage?: number;
+  current_remaining_percent?: number;
   model_name?: string;
   current_weekly_total_count?: number;
   current_weekly_usage_count?: number;
   current_weekly_remaining_percent?: number;
+  weekly_total?: number;
+  weekly_usage?: number;
+  weekly_remaining_percent?: number;
   weekly_remains_time?: number;
 };
 
@@ -106,9 +112,21 @@ type ExtensionConfig = {
   refreshIntervalSeconds: number;
   showWeeklyInStatusBar: boolean;
   detailModelLimit: number;
+  currentQuotaCount: number;
+  weeklyQuotaCount: number;
   statusBarAlignment: "left" | "right";
   requestTimeoutMs: number;
   language: LanguagePreference;
+};
+
+type QuotaConfig = Pick<ExtensionConfig, "currentQuotaCount" | "weeklyQuotaCount">;
+
+type StoredApiKeyConfig = Partial<ApiKeyEntry> & {
+  refresh_interval?: unknown;
+  current_quota_count?: unknown;
+  weekly_quota_count?: unknown;
+  created_at?: unknown;
+  is_active?: unknown;
 };
 
 type StatusItemSpec = {
@@ -770,7 +788,7 @@ async function refreshUsageForKey(keyId: string, reason: "startup" | "auto" | "m
     const timeoutMs = readConfig().requestTimeoutMs;
     const keyEntry = multiKeyState.getKeyById(keyId);
     const result = await fetchRemains(apiKey, timeoutMs, keyEntry?.endpoint);
-    const vm = buildUsageViewModel(result);
+    const vm = buildUsageViewModel(result, quotaConfigForKey(keyEntry));
 
     multiKeyState.updateUsageForKey(keyId, vm);
 
@@ -1128,9 +1146,12 @@ async function buildKeyListWithMaskedKeys(keys: ApiKeyEntry[]): Promise<Record<s
         masked = maskApiKey(raw);
       }
     }
+    const quotaConfig = quotaConfigForKey(k);
     result.push({
       id: k.id, name: k.name, color: k.color,
       refresh_interval: k.refreshInterval,
+      current_quota_count: quotaConfig.currentQuotaCount,
+      weekly_quota_count: quotaConfig.weeklyQuotaCount,
       created_at: k.createdAt, is_active: k.isActive,
       endpoint: k.endpoint || "domestic",
       masked_key: masked,
@@ -1154,6 +1175,8 @@ async function handleInvokeCommand(
         refresh_interval_seconds: config.refreshIntervalSeconds,
         show_weekly_in_status: config.showWeeklyInStatusBar,
         detail_model_limit: config.detailModelLimit,
+        current_quota_count: config.currentQuotaCount,
+        weekly_quota_count: config.weeklyQuotaCount,
         language: config.language,
         first_run: false,
         start_minimized: false,
@@ -1201,26 +1224,30 @@ async function handleInvokeCommand(
           await vs.update("language", config.language, true);
         if (typeof config.detail_model_limit === "number")
           await vs.update("detailModelLimit", config.detail_model_limit, true);
+        if (typeof config.current_quota_count === "number")
+          await vs.update("currentQuotaCount", config.current_quota_count, true);
+        if (typeof config.weekly_quota_count === "number")
+          await vs.update("weeklyQuotaCount", config.weekly_quota_count, true);
       }
       return { ok: true };
     }
 
     case "cmd_add_api_key": {
-      const { name, apiKey, color, refreshInterval, endpoint } = (args || {}) as {
-        name: string; apiKey: string; color?: string; refreshInterval?: number; endpoint?: string;
+      const { name, apiKey, color, refreshInterval, currentQuotaCount, weeklyQuotaCount, endpoint } = (args || {}) as {
+        name: string; apiKey: string; color?: string; refreshInterval?: number; currentQuotaCount?: number; weeklyQuotaCount?: number; endpoint?: string;
       };
       if (!apiKey) throw new Error("API key is required");
       const v = validateApiKey(apiKey);
       if (!v.ok) throw new Error(v.message);
-      const k = await addApiKey(name, apiKey, { color, refreshInterval, endpoint });
+      const k = await addApiKey(name, apiKey, { color, refreshInterval, currentQuotaCount, weeklyQuotaCount, endpoint });
       if (!k) throw new Error("Failed to add key");
       await refreshUsageForKey(k.id, "manual");
       return { ok: true };
     }
 
     case "cmd_update_api_key": {
-      const { id, name, color, refreshInterval, apiKey, endpoint } = (args || {}) as {
-        id: string; name: string; color: string; refreshInterval: number; apiKey?: string; endpoint?: string;
+      const { id, name, color, refreshInterval, currentQuotaCount, weeklyQuotaCount, apiKey, endpoint } = (args || {}) as {
+        id: string; name: string; color: string; refreshInterval: number; currentQuotaCount?: number; weeklyQuotaCount?: number; apiKey?: string; endpoint?: string;
       };
       const existing = multiKeyState.getKeyById(id);
       if (!existing) throw new Error("Key not found");
@@ -1228,6 +1255,12 @@ async function handleInvokeCommand(
       if (name) up.name = name;
       if (color) up.color = color;
       if (refreshInterval) up.refreshInterval = refreshInterval;
+      if (typeof currentQuotaCount === "number") {
+        up.currentQuotaCount = clampNumber(Number(currentQuotaCount), 1, 100000000);
+      }
+      if (typeof weeklyQuotaCount === "number") {
+        up.weeklyQuotaCount = clampNumber(Number(weeklyQuotaCount), 1, 100000000);
+      }
       if (endpoint) up.endpoint = endpoint;
       multiKeyState.addOrUpdateKey(up as unknown as ApiKeyEntry);
       if (apiKey?.trim() && secretStore) {
@@ -1463,11 +1496,81 @@ function buildAggregateVm(metrics: { used: number; remaining: number; total: num
 // Load API keys from config into multiKeyState
 async function loadMultiKeyState(): Promise<void> {
   const config = vscode.workspace.getConfiguration("minimaxUsage");
-  const keys: ApiKeyEntry[] = config.get("apiKeys", []);
+  const rawKeys = config.get<StoredApiKeyConfig[]>("apiKeys", []);
+  const { keys, changed } = normalizeStoredApiKeys(rawKeys);
   const selectedId: string = config.get("selectedKeyId", "ALL");
+  if (changed) {
+    await config.update("apiKeys", keys, vscode.ConfigurationTarget.Global);
+  }
   multiKeyState.setApiKeys(keys);
   multiKeyState.selectedKeyId = selectedId;
-  log(`loaded ${keys.length} keys, selected=${selectedId}`);
+  log(`loaded ${keys.length} keys, selected=${selectedId}${changed ? " migrated" : ""}`);
+}
+
+function normalizeStoredApiKeys(rawKeys: StoredApiKeyConfig[]): { keys: ApiKeyEntry[]; changed: boolean } {
+  const fallback = readConfig();
+  const keys: ApiKeyEntry[] = [];
+  let changed = false;
+
+  rawKeys.forEach((raw, index) => {
+    if (!raw || typeof raw.id !== "string" || !raw.id) {
+      changed = true;
+      return;
+    }
+
+    const normalized: ApiKeyEntry = {
+      id: raw.id,
+      name: typeof raw.name === "string" && raw.name.trim() ? raw.name : `Key ${index + 1}`,
+      color: typeof raw.color === "string" && raw.color ? raw.color : "#00d4ff",
+      refreshInterval: readNumber(
+        raw.refreshInterval ?? raw.refresh_interval,
+        fallback.refreshIntervalSeconds,
+        5,
+        3600,
+      ),
+      currentQuotaCount: readNumber(
+        raw.currentQuotaCount ?? raw.current_quota_count,
+        fallback.currentQuotaCount,
+        1,
+        100000000,
+      ),
+      weeklyQuotaCount: readNumber(
+        raw.weeklyQuotaCount ?? raw.weekly_quota_count,
+        fallback.weeklyQuotaCount,
+        1,
+        100000000,
+      ),
+      createdAt: readNumber(raw.createdAt ?? raw.created_at, Date.now(), 0, Number.MAX_SAFE_INTEGER),
+      isActive: readBoolean(raw.isActive ?? raw.is_active, true),
+      endpoint: raw.endpoint === "overseas" ? "overseas" : "domestic",
+    };
+
+    if (
+      raw.refreshInterval !== normalized.refreshInterval ||
+      raw.currentQuotaCount !== normalized.currentQuotaCount ||
+      raw.weeklyQuotaCount !== normalized.weeklyQuotaCount ||
+      raw.createdAt !== normalized.createdAt ||
+      raw.isActive !== normalized.isActive ||
+      raw.endpoint !== normalized.endpoint ||
+      raw.name !== normalized.name ||
+      raw.color !== normalized.color
+    ) {
+      changed = true;
+    }
+
+    keys.push(normalized);
+  });
+
+  return { keys, changed };
+}
+
+function readNumber(value: unknown, fallback: number, min: number, max: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? clampNumber(parsed, min, max) : fallback;
+}
+
+function readBoolean(value: unknown, fallback: boolean): boolean {
+  return typeof value === "boolean" ? value : fallback;
 }
 
 // Show welcome prompt when no API keys are configured (once per extension-host session).
@@ -1528,7 +1631,13 @@ async function setSelectedKey(keyId: string): Promise<void> {
 async function addApiKey(
   name: string,
   apiKey: string,
-  options: { color?: string; refreshInterval?: number; endpoint?: string } = {},
+  options: {
+    color?: string;
+    refreshInterval?: number;
+    currentQuotaCount?: number;
+    weeklyQuotaCount?: number;
+    endpoint?: string;
+  } = {},
 ): Promise<ApiKeyEntry | null> {
   if (!secretStore) return null;
 
@@ -1538,11 +1647,14 @@ async function addApiKey(
   const color = options.color || palette.find((c) => !usedColors.includes(c)) || palette[0];
 
   const id = `key_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const config = readConfig();
   const newKey: ApiKeyEntry = {
     id,
     name,
     color,
-    refreshInterval: options.refreshInterval || readConfig().refreshIntervalSeconds,
+    refreshInterval: options.refreshInterval || config.refreshIntervalSeconds,
+    currentQuotaCount: clampNumber(Number(options.currentQuotaCount ?? config.currentQuotaCount), 1, 100000000),
+    weeklyQuotaCount: clampNumber(Number(options.weeklyQuotaCount ?? config.weeklyQuotaCount), 1, 100000000),
     createdAt: Date.now(),
     isActive: true,
     endpoint: options.endpoint === "overseas" ? "overseas" : "domestic",
@@ -1614,12 +1726,30 @@ function readConfig(): ExtensionConfig {
     refreshIntervalSeconds: Math.max(15, Number(config.get("refreshIntervalSeconds", 60))),
     showWeeklyInStatusBar: Boolean(config.get("showWeeklyInStatusBar", true)),
     detailModelLimit: clampNumber(Number(config.get("detailModelLimit", 8)), 1, 30),
+    currentQuotaCount: clampNumber(Number(config.get("currentQuotaCount", 1500)), 1, 100000000),
+    weeklyQuotaCount: clampNumber(Number(config.get("weeklyQuotaCount", 15000)), 1, 100000000),
     statusBarAlignment: alignmentValue === "right" ? "right" : "left",
     requestTimeoutMs: clampNumber(Number(config.get("requestTimeoutMs", 15000)), 3000, 60000),
     language:
       languageValue === "zh-CN" || languageValue === "en" || languageValue === "auto"
         ? languageValue
         : "auto",
+  };
+}
+
+function quotaConfigForKey(key?: ApiKeyEntry | null): QuotaConfig {
+  const config = readConfig();
+  return {
+    currentQuotaCount: clampNumber(
+      Number(key?.currentQuotaCount ?? config.currentQuotaCount),
+      1,
+      100000000,
+    ),
+    weeklyQuotaCount: clampNumber(
+      Number(key?.weeklyQuotaCount ?? config.weeklyQuotaCount),
+      1,
+      100000000,
+    ),
   };
 }
 
@@ -1746,17 +1876,20 @@ function buildErrorViewModel(message: string, raw: unknown = null): UsageViewMod
 }
 
 function hasCurrentQuotaData(model: ModelRemain): boolean {
-  return (model.current_interval_total_count ?? 0) > 0 ||
-    (model.current_interval_usage_count ?? 0) > 0;
+  return getCurrentTotalCount(model) > 0 || getCurrentUsageCount(model) > 0;
 }
 
 function hasWeeklyQuotaData(model: ModelRemain): boolean {
-  return (model.current_weekly_total_count ?? 0) > 0 ||
-    (model.current_weekly_usage_count ?? 0) > 0;
+  return getWeeklyTotalCount(model) > 0 || getWeeklyUsageCount(model) > 0;
+}
+
+function isGeneralModel(model: ModelRemain): boolean {
+  return model.model_name?.toLowerCase() === "general";
 }
 
 function selectPrimaryModel(models: ModelRemain[]): ModelRemain | undefined {
-  return models.find(hasCurrentQuotaData) ??
+  return models.find(isGeneralModel) ??
+    models.find(hasCurrentQuotaData) ??
     models.find(hasWeeklyQuotaData) ??
     models[0];
 }
@@ -1773,6 +1906,47 @@ function percentFromCount(count: number | null, total: number | null): number | 
     return null;
   }
   return clampPercent((count / total) * 100);
+}
+
+function getCurrentTotalCount(model: ModelRemain): number {
+  return model.current_interval_total_count ?? model.current_total ?? 0;
+}
+
+function getCurrentUsageCount(model: ModelRemain): number {
+  return model.current_interval_usage_count ?? model.current_usage ?? 0;
+}
+
+function getCurrentRemainingPercent(model: ModelRemain): number | undefined {
+  return model.current_interval_remaining_percent ?? model.current_remaining_percent;
+}
+
+function getWeeklyTotalCount(model: ModelRemain): number {
+  return model.current_weekly_total_count ?? model.weekly_total ?? 0;
+}
+
+function getWeeklyUsageCount(model: ModelRemain): number {
+  return model.current_weekly_usage_count ?? model.weekly_usage ?? 0;
+}
+
+function getWeeklyRemainingPercent(model: ModelRemain): number | undefined {
+  return model.current_weekly_remaining_percent ?? model.weekly_remaining_percent;
+}
+
+function countsFromRemainingPercent(total: number, remainingPercent: number): {
+  total: number;
+  remaining: number;
+  used: number;
+} {
+  const normalizedTotal = Math.max(0, Math.floor(total));
+  const remaining = Math.min(
+    normalizedTotal,
+    Math.max(0, Math.round((normalizedTotal * clampPercent(remainingPercent)) / 100)),
+  );
+  return {
+    total: normalizedTotal,
+    remaining,
+    used: Math.max(0, normalizedTotal - remaining),
+  };
 }
 
 function countsFromUsageField(
@@ -1795,14 +1969,14 @@ function countsFromUsageField(
 
 function selectWeeklyRemainingPercent(models: ModelRemain[]): number | null {
   const values = models
-    .map((model) => model.current_weekly_remaining_percent)
+    .map(getWeeklyRemainingPercent)
     .filter((value): value is number => typeof value === "number" && Number.isFinite(value))
     .map(clampPercent);
 
   return values.length > 0 ? Math.min(...values) : null;
 }
 
-function buildUsageViewModel(result: RemainsResult): UsageViewModel {
+function buildUsageViewModel(result: RemainsResult, quotaConfig: QuotaConfig = readConfig()): UsageViewModel {
   const strings = getRuntimeStrings();
   const payload = (result.raw ?? null) as MiniMaxRawPayload | null;
   const models = Array.isArray(payload?.model_remains) ? payload.model_remains : [];
@@ -1820,30 +1994,47 @@ function buildUsageViewModel(result: RemainsResult): UsageViewModel {
   }
 
   const usageCountSemantics = result.usageCountSemantics;
-  const totalCount = primaryModel.current_interval_total_count ?? 0;
+  let totalCount = getCurrentTotalCount(primaryModel);
   const currentCounts = countsFromUsageField(
     totalCount,
-    primaryModel.current_interval_usage_count ?? 0,
+    getCurrentUsageCount(primaryModel),
     usageCountSemantics,
   );
-  const usedCount = currentCounts.used;
-  const remainingCount = currentCounts.remaining;
-  const remainingPercent = typeof primaryModel.current_interval_remaining_percent === "number"
-    ? clampPercent(primaryModel.current_interval_remaining_percent)
+  let usedCount = currentCounts.used;
+  let remainingCount = currentCounts.remaining;
+  const currentRemainingPct = getCurrentRemainingPercent(primaryModel);
+  const remainingPercent = typeof currentRemainingPct === "number"
+    ? clampPercent(currentRemainingPct)
     : percentFromCount(remainingCount, totalCount);
+  if (totalCount <= 0 && remainingPercent !== null) {
+    const inferred = countsFromRemainingPercent(quotaConfig.currentQuotaCount, remainingPercent);
+    totalCount = inferred.total;
+    remainingCount = inferred.remaining;
+    usedCount = inferred.used;
+  }
   const usedPercent = remainingPercent !== null
     ? clampPercent(100 - remainingPercent)
     : (totalCount > 0 ? clampPercent((usedCount / totalCount) * 100) : 0);
-  const weeklyTotalCount = primaryModel.current_weekly_total_count ?? 0;
+  let weeklyTotalCount = getWeeklyTotalCount(primaryModel);
   const weeklyCounts = countsFromUsageField(
     weeklyTotalCount,
-    primaryModel.current_weekly_usage_count ?? 0,
+    getWeeklyUsageCount(primaryModel),
     usageCountSemantics,
   );
-  const weeklyUsedCount = weeklyCounts.used;
-  const weeklyRemainingCount = weeklyCounts.remaining;
+  let weeklyUsedCount = weeklyCounts.used;
+  let weeklyRemainingCount = weeklyCounts.remaining;
+  const weeklyRemainingPct = getWeeklyRemainingPercent(primaryModel);
   const weeklyRemainingPercent =
-    selectWeeklyRemainingPercent(models) ?? percentFromCount(weeklyRemainingCount, weeklyTotalCount);
+    (typeof weeklyRemainingPct === "number"
+      ? clampPercent(weeklyRemainingPct)
+      : selectWeeklyRemainingPercent(models)) ??
+    percentFromCount(weeklyRemainingCount, weeklyTotalCount);
+  if (weeklyTotalCount <= 0 && weeklyRemainingPercent !== null) {
+    const inferred = countsFromRemainingPercent(quotaConfig.weeklyQuotaCount, weeklyRemainingPercent);
+    weeklyTotalCount = inferred.total;
+    weeklyRemainingCount = inferred.remaining;
+    weeklyUsedCount = inferred.used;
+  }
   const weeklyUsedPercent = weeklyRemainingPercent !== null
     ? clampPercent(100 - weeklyRemainingPercent)
     : (weeklyTotalCount > 0 ? clampPercent((weeklyUsedCount / weeklyTotalCount) * 100) : null);
@@ -1854,10 +2045,10 @@ function buildUsageViewModel(result: RemainsResult): UsageViewModel {
   const filteredModels = models
     .filter(hasCurrentQuotaData)
     .map((model) => {
-      const modelTotalCount = model.current_interval_total_count ?? 0;
+      const modelTotalCount = getCurrentTotalCount(model);
       const modelCounts = countsFromUsageField(
         modelTotalCount,
-        model.current_interval_usage_count ?? 0,
+        getCurrentUsageCount(model),
         usageCountSemantics,
       );
       return {
@@ -2142,7 +2333,10 @@ function rebuildUsageViewModelFromRaw(raw: unknown): UsageViewModel | null {
     return null;
   }
 
-  return buildUsageViewModel(summarizeRemainsPayload(raw));
+  const selectedKey = multiKeyState.selectedKeyId === "ALL"
+    ? null
+    : multiKeyState.getKeyById(multiKeyState.selectedKeyId);
+  return buildUsageViewModel(summarizeRemainsPayload(raw), quotaConfigForKey(selectedKey));
 }
 
 function getDateTimeParts(timestamp: number): Record<string, string> {

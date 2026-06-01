@@ -5,6 +5,8 @@ use std::fs;
 
 use minimax_usage_monitor_lib::{api_key_store, config, ApiKeyEntry};
 
+static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn unique_test_dir() -> std::path::PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -24,13 +26,17 @@ fn create_test_entry(name: &str, color: &str) -> ApiKeyEntry {
         keychain_service: "com.decard.test".to_string(),
         keychain_account: uuid::Uuid::new_v4().to_string(),
         refresh_interval: 20,
+        current_quota_count: 1500,
+        weekly_quota_count: 15000,
         created_at: chrono::Utc::now().timestamp(),
         is_active: true,
+        endpoint: "domestic".to_string(),
     }
 }
 
 #[test]
 fn test_delete_workflow_simulation() {
+    let _guard = TEST_ENV_LOCK.lock().unwrap();
     let test_dir = unique_test_dir();
     env::set_var(
         "MINIMAX_MONITOR_CONFIG_DIR",
@@ -103,6 +109,7 @@ fn test_delete_workflow_simulation() {
 
 #[test]
 fn test_delete_preserves_other_keys() {
+    let _guard = TEST_ENV_LOCK.lock().unwrap();
     let test_dir = unique_test_dir();
     env::set_var(
         "MINIMAX_MONITOR_CONFIG_DIR",

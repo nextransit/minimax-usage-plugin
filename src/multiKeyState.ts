@@ -7,6 +7,8 @@ export interface ApiKeyEntry {
   name: string;
   color: string;
   refreshInterval: number;
+  currentQuotaCount?: number;
+  weeklyQuotaCount?: number;
   createdAt: number;
   isActive: boolean;
   endpoint?: string; // "domestic" (default) | "overseas"
@@ -160,6 +162,7 @@ export class MultiKeyState {
     let primaryModel = '';
     let hasData = false;
     let activeCount = 0;
+    let maxReportedPercent: number | null = null;
 
     for (const key of this.activeKeys) {
       const data = this._usageData.get(key.id);
@@ -176,13 +179,18 @@ export class MultiKeyState {
         if (data.usedCount !== null) {
           used += data.usedCount;
         }
+        if (data.usedPercent !== null && Number.isFinite(data.usedPercent)) {
+          maxReportedPercent = maxReportedPercent === null
+            ? data.usedPercent
+            : Math.max(maxReportedPercent, data.usedPercent);
+        }
         if (!primaryModel && data.primaryModelName) {
           primaryModel = data.primaryModelName;
         }
       }
     }
 
-    const percent = total > 0 ? (used / total) * 100 : 0;
+    const percent = total > 0 ? (used / total) * 100 : (maxReportedPercent ?? 0);
 
     return {
       used,

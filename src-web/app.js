@@ -127,6 +127,8 @@ const DEFAULT_CONFIG = Object.freeze({
   show_weekly_in_status: true,
   show_percent_in_tray: true,
   detail_model_limit: 8,
+  current_quota_count: 1500,
+  weekly_quota_count: 15000,
   language: 'auto',
   first_run: false,
   start_minimized: false,
@@ -205,6 +207,8 @@ const i18n = {
   'zh-CN': {
     settings: '设置',
     refreshInterval: '刷新时间（秒）',
+    currentQuotaCount: '当前周期额度',
+    weeklyQuotaCount: '本周累计额度',
     startMinimized: '启动时最小化到菜单栏',
     autoStart: '开机自动启动',
     enableNotifications: '启用系统通知',
@@ -312,6 +316,8 @@ const i18n = {
   en: {
     settings: 'Settings',
     refreshInterval: 'Refresh interval (seconds)',
+    currentQuotaCount: 'Current cycle quota',
+    weeklyQuotaCount: 'Weekly cumulative quota',
     startMinimized: 'Start minimized to menu bar',
     autoStart: 'Launch at login',
     enableNotifications: 'Enable system notifications',
@@ -887,7 +893,9 @@ async function saveApiKey() {
       name: 'Key ' + (state.apiKeys.length + 1),
       color: '#00d4ff',
       apiKey: apiKey,
-      refreshInterval: settings.refresh_interval_seconds || 20
+      refreshInterval: settings.refresh_interval_seconds || 20,
+      currentQuotaCount: DEFAULT_CONFIG.current_quota_count,
+      weeklyQuotaCount: DEFAULT_CONFIG.weekly_quota_count,
     }, WRITE_IPC_TIMEOUT_MS);
     hideApiKeyDialog();
     await loadApiKeys();
@@ -1035,6 +1043,7 @@ async function saveSetting(key, value) {
     await invokeWithTimeout('cmd_save_config', { config }, WRITE_IPC_TIMEOUT_MS);
     settings[key] = value;
     state.config = { ...state.config, ...config };
+    scheduleRender();
   } catch (error) {
     console.error('Save setting error:', error);
   }
@@ -1044,6 +1053,12 @@ function normalizeRefreshIntervalSeconds(value) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return 20;
   return Math.min(3600, Math.max(5, Math.round(parsed)));
+}
+
+function normalizeQuotaCount(value, fallback) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(100000000, Math.max(1, Math.round(parsed)));
 }
 
 async function saveAutostart(enabled) {
@@ -1236,7 +1251,7 @@ function renderAggregateView() {
   setText('interval-label', m.intervalLabel || statusLabel);
 
   // CURRENT aggregate
-  const currentPercent = m.total > 0 ? clampPercent((m.used / m.total) * 100) : 0;
+  const currentPercent = m.total > 0 ? clampPercent((m.used / m.total) * 100) : (m.usedPercent ?? 0);
   const currentStatus = getStatus(currentPercent);
   setText('current-used', formatNumber(m.used));
   setFlipNumber('current-remaining-container', 'current-remaining', formatNumber(m.remaining));
@@ -1917,6 +1932,7 @@ function getAggregateMetrics() {
   const totals = {
     used: 0, remaining: 0, total: 0,
     weeklyUsed: 0, weeklyRemaining: 0, weeklyTotal: 0,
+    usedPercent: null,
     weeklyRemainingPercent: null,
     earliestReset: 0, earliestWeeklyReset: 0,
     primaryModel: '', intervalLabel: '',
@@ -1932,6 +1948,12 @@ function getAggregateMetrics() {
     totals.weeklyUsed += data.weekly_used_count || 0;
     totals.weeklyRemaining += data.weekly_remaining_count || 0;
     totals.weeklyTotal += data.weekly_total_count || 0;
+    if (typeof data.used_percent === 'number' && Number.isFinite(data.used_percent)) {
+      const pct = clampPercent(data.used_percent);
+      totals.usedPercent = totals.usedPercent === null
+        ? pct
+        : Math.max(totals.usedPercent, pct);
+    }
     if (typeof data.weekly_remaining_percent === 'number' && Number.isFinite(data.weekly_remaining_percent)) {
       const pct = clampPercent(data.weekly_remaining_percent);
       totals.weeklyRemainingPercent = totals.weeklyRemainingPercent === null
@@ -1954,7 +1976,7 @@ function getAggregateMetrics() {
 
 function getAggregatePercent() {
   const m = getAggregateMetrics();
-  if (!m.total) return 0;
+  if (!m.total) return m.usedPercent ?? 0;
   return clampPercent((m.used / m.total) * 100);
 }
 
@@ -2249,6 +2271,8 @@ function openKeyEditDialog(keyId = null) {
   const nameInput = document.getElementById('key-edit-name');
   const colorInput = document.getElementById('key-edit-color');
   const intervalInput = document.getElementById('key-edit-interval');
+  const currentQuotaInput = document.getElementById('key-edit-current-quota');
+  const weeklyQuotaInput = document.getElementById('key-edit-weekly-quota');
   const apiKeyInput = document.getElementById('key-edit-api-key');
   const endpointSelect = document.getElementById('key-edit-endpoint');
 
@@ -2269,6 +2293,14 @@ function openKeyEditDialog(keyId = null) {
       nameInput.value = key.name;
       colorInput.value = key.color;
       intervalInput.value = key.refresh_interval;
+      currentQuotaInput.value = String(normalizeQuotaCount(
+        key.current_quota_count,
+        DEFAULT_CONFIG.current_quota_count,
+      ));
+      weeklyQuotaInput.value = String(normalizeQuotaCount(
+        key.weekly_quota_count,
+        DEFAULT_CONFIG.weekly_quota_count,
+      ));
       if (endpointSelect) endpointSelect.value = key.endpoint || 'domestic';
       apiKeyInput.type = 'text';
       apiKeyInput.value = key.masked_key || '';
@@ -2282,6 +2314,8 @@ function openKeyEditDialog(keyId = null) {
     nameInput.value = '';
     colorInput.value = '#00d4ff';
     intervalInput.value = '20';
+    currentQuotaInput.value = String(DEFAULT_CONFIG.current_quota_count);
+    weeklyQuotaInput.value = String(DEFAULT_CONFIG.weekly_quota_count);
     if (endpointSelect) endpointSelect.value = 'domestic';
     apiKeyInput.type = 'password';
     apiKeyInput.value = '';
@@ -2311,6 +2345,14 @@ async function saveKeyEdit() {
   const name = document.getElementById('key-edit-name').value.trim();
   const color = document.getElementById('key-edit-color').value;
   const interval = parseInt(document.getElementById('key-edit-interval').value) || 20;
+  const currentQuotaCount = normalizeQuotaCount(
+    document.getElementById('key-edit-current-quota')?.value,
+    DEFAULT_CONFIG.current_quota_count,
+  );
+  const weeklyQuotaCount = normalizeQuotaCount(
+    document.getElementById('key-edit-weekly-quota')?.value,
+    DEFAULT_CONFIG.weekly_quota_count,
+  );
   const apiKeyInput = document.getElementById('key-edit-api-key');
   const maskedKey = apiKeyInput.dataset.maskedKey || '';
   const rawApiKey = apiKeyInput.value.trim();
@@ -2335,7 +2377,7 @@ async function saveKeyEdit() {
     if (id) {
       console.log('[saveKeyEdit] Updating existing key:', id);
       await invokeWithTimeout('cmd_update_api_key', {
-        id, name, color, refreshInterval: interval, apiKey: apiKey || null, endpoint
+        id, name, color, refreshInterval: interval, currentQuotaCount, weeklyQuotaCount, apiKey: apiKey || null, endpoint
       }, WRITE_IPC_TIMEOUT_MS);
       console.log('[saveKeyEdit] Update successful');
     } else {
@@ -2346,7 +2388,7 @@ async function saveKeyEdit() {
       }
       console.log('[saveKeyEdit] Adding new key, name:', name);
       const result = await invokeWithTimeout('cmd_add_api_key', {
-        name, color, apiKey: apiKey, refreshInterval: interval, endpoint
+        name, color, apiKey: apiKey, refreshInterval: interval, currentQuotaCount, weeklyQuotaCount, endpoint
       }, WRITE_IPC_TIMEOUT_MS);
       console.log('[saveKeyEdit] Add successful, result:', result);
     }

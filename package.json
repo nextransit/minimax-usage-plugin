@@ -3,7 +3,7 @@
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
   "icon": "images/icon.png",
-  "version": "0.0.14",
+  "version": "0.0.15",
   "publisher": "decard",
   "license": "MIT",
   "repository": {
@@ -152,11 +152,30 @@
               "refreshInterval": {
                 "type": "number"
               },
+              "currentQuotaCount": {
+                "type": "number",
+                "default": 1500,
+                "minimum": 1,
+                "maximum": 100000000
+              },
+              "weeklyQuotaCount": {
+                "type": "number",
+                "default": 15000,
+                "minimum": 1,
+                "maximum": 100000000
+              },
               "createdAt": {
                 "type": "number"
               },
               "isActive": {
                 "type": "boolean"
+              },
+              "endpoint": {
+                "type": "string",
+                "enum": [
+                  "domestic",
+                  "overseas"
+                ]
               }
             }
           }

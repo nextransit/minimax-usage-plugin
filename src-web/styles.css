@@ -194,7 +194,7 @@ body {
 
 .data-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 16px;
   margin-bottom: 32px;
 }
@@ -206,6 +206,7 @@ body {
   gap: 4px;
   position: relative;
   min-height: 54px;
+  min-width: 0;
 }
 
 .data-label {
@@ -216,10 +217,14 @@ body {
 }
 
 .data-value {
+  display: inline-block;
   font-size: 18px;
   font-weight: 800;
   color: var(--text-bright);
   font-family: 'SF Mono', 'Fira Code', monospace;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.15;
+  white-space: nowrap;
 }
 
 .data-value.highlight { color: var(--primary); }
@@ -286,6 +291,10 @@ body {
 .flip-number {
   position: relative;
   display: inline-block;
+  width: max-content;
+  max-width: 100%;
+  padding-right: 0.12em;
+  margin-right: -0.12em;
   perspective: 760px;
   transform-style: preserve-3d;
   transform-origin: center 56%;
@@ -1450,15 +1459,17 @@ body {
 
 .breakdown-metric-row {
   display: grid;
-  grid-template-columns: 70px 1fr 50px 110px 110px;
+  grid-template-columns: minmax(70px, max-content) minmax(48px, 1fr) minmax(50px, max-content) minmax(120px, max-content) minmax(110px, max-content);
   align-items: center;
   gap: 10px;
+  min-width: 0;
 }
 
 .breakdown-metric-row .metric-label {
   font-size: 10px;
   letter-spacing: 0.6px;
   color: var(--text-dim);
+  white-space: nowrap;
 }
 
 .breakdown-metric-row .metric-bar {
@@ -1497,6 +1508,7 @@ body {
   font-size: 12px;
   text-align: right;
   color: var(--text-bright);
+  white-space: nowrap;
 }
 .breakdown-metric-row.warning .metric-pct { color: var(--warning); }
 .breakdown-metric-row.critical .metric-pct { color: var(--danger); }
@@ -1507,6 +1519,8 @@ body {
   color: var(--text-dim);
   text-align: right;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  min-width: max-content;
 }
 
 .breakdown-expand {

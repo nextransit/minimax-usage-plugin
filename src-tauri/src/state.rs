@@ -11,6 +11,8 @@ pub struct AppConfig {
     pub show_weekly_in_status: bool,
     pub show_percent_in_tray: bool,
     pub detail_model_limit: u32,
+    pub current_quota_count: i64,
+    pub weekly_quota_count: i64,
     pub language: String,
     pub first_run: bool,
     pub start_minimized: bool,
@@ -27,6 +29,8 @@ impl Default for AppConfig {
             show_weekly_in_status: true,
             show_percent_in_tray: true,
             detail_model_limit: 8,
+            current_quota_count: 1500,
+            weekly_quota_count: 15000,
             language: "auto".to_string(),
             first_run: true,
             start_minimized: false,
@@ -79,14 +83,26 @@ pub struct ApiKeyEntry {
     pub keychain_service: String, // Keychain service identifier
     pub keychain_account: String, // Keychain account
     pub refresh_interval: u32,    // Seconds (min: 5, default: 20)
-    pub created_at: i64,          // Unix timestamp
-    pub is_active: bool,          // Whether this key is used
+    #[serde(default = "default_current_quota_count")]
+    pub current_quota_count: i64,
+    #[serde(default = "default_weekly_quota_count")]
+    pub weekly_quota_count: i64,
+    pub created_at: i64, // Unix timestamp
+    pub is_active: bool, // Whether this key is used
     #[serde(default = "default_endpoint")]
     pub endpoint: String, // "domestic" (default) | "overseas"
 }
 
 fn default_endpoint() -> String {
     "domestic".to_string()
+}
+
+pub fn default_current_quota_count() -> i64 {
+    1500
+}
+
+pub fn default_weekly_quota_count() -> i64 {
+    15000
 }
 
 pub struct AppState {

@@ -352,6 +352,14 @@
           <input type="number" id="key-edit-interval" class="dialog-input" value="20" min="5" />
         </div>
         <div class="form-group">
+          <label data-i18n="currentQuotaCount">Current cycle quota</label>
+          <input type="number" id="key-edit-current-quota" class="dialog-input" value="1500" min="1" max="100000000" step="1" />
+        </div>
+        <div class="form-group">
+          <label data-i18n="weeklyQuotaCount">Weekly cumulative quota</label>
+          <input type="number" id="key-edit-weekly-quota" class="dialog-input" value="15000" min="1" max="100000000" step="1" />
+        </div>
+        <div class="form-group">
           <label data-i18n="keyRegion">Region</label>
           <select id="key-edit-endpoint" class="dialog-input">
             <option value="domestic" data-i18n="regionDomestic">Domestic (minimaxi.com)</option>

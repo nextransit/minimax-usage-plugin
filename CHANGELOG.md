@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.0.15
+
+- MiniMax 用量接口兼容新旧字段，按 `general` 模型优先解析当前周期和本周剩余百分比。
+- 新增每个 API Key 独立配置当前周期额度和本周累计额度，用剩余百分比反推用量。
+- 修复 VS Code 插件旧 API Key 配置字段迁移，避免旧配置刷新后用量显示为 0。
+- 修复桌面端和 VS Code webview 数字显示偶发截断最后一位的问题。
+
 ## 0.0.14
 
 - 支持 MiniMax Token Plan 新用量接口 `/v1/token_plan/remains`，并保留旧 `coding_plan/remains` 回退。

@@ -40,19 +40,25 @@ struct ModelRemain {
     end_time: Option<i64>,
     #[serde(rename = "remains_time")]
     remains_time: Option<i64>,
-    #[serde(rename = "current_interval_total_count")]
+    #[serde(rename = "current_interval_total_count", alias = "current_total")]
     current_interval_total_count: Option<i64>,
-    #[serde(rename = "current_interval_usage_count")]
+    #[serde(rename = "current_interval_usage_count", alias = "current_usage")]
     current_interval_usage_count: Option<i64>,
-    #[serde(rename = "current_interval_remaining_percent")]
+    #[serde(
+        rename = "current_interval_remaining_percent",
+        alias = "current_remaining_percent"
+    )]
     current_interval_remaining_percent: Option<f64>,
     #[serde(rename = "model_name")]
     model_name: Option<String>,
-    #[serde(rename = "current_weekly_total_count")]
+    #[serde(rename = "current_weekly_total_count", alias = "weekly_total")]
     current_weekly_total_count: Option<i64>,
-    #[serde(rename = "current_weekly_usage_count")]
+    #[serde(rename = "current_weekly_usage_count", alias = "weekly_usage")]
     current_weekly_usage_count: Option<i64>,
-    #[serde(rename = "current_weekly_remaining_percent")]
+    #[serde(
+        rename = "current_weekly_remaining_percent",
+        alias = "weekly_remaining_percent"
+    )]
     current_weekly_remaining_percent: Option<f64>,
     #[serde(rename = "weekly_remains_time")]
     weekly_remains_time: Option<i64>,
@@ -92,7 +98,12 @@ pub async fn fetch_minimax_usage(
     let token_plan_url = resolve_token_plan_endpoint(endpoint);
     let legacy_url = resolve_legacy_coding_plan_endpoint(endpoint);
     let (payload, semantics) = tokio::task::spawn_blocking(move || {
-        fetch_minimax_payload_blocking_with_compat(&api_key, timeout_ms, &token_plan_url, &legacy_url)
+        fetch_minimax_payload_blocking_with_compat(
+            &api_key,
+            timeout_ms,
+            &token_plan_url,
+            &legacy_url,
+        )
     })
     .await
     .map_err(|e| format!("MiniMax request task failed: {}", e))??;
@@ -144,19 +155,23 @@ fn build_usage_data_from_payload(
     let models = payload.model_remains.take().unwrap_or_default();
     let primary = select_primary_model(&models);
 
-    let (total_count, remaining_count, used_count, used_percent) = if let Some(m) = primary {
-        let (total, used, remaining) = current_counts(m, semantics);
-        let percent = used_percent_from_counts(total, used);
-        (Some(total), Some(remaining), Some(used), Some(percent))
-    } else {
-        (None, None, None, None)
-    };
+    let (total_count, remaining_count, used_count, current_used_percent_from_counts) =
+        if let Some(m) = primary {
+            let (total, used, remaining) = current_counts(m, semantics);
+            let percent = used_percent_from_counts(total, used);
+            (Some(total), Some(remaining), Some(used), Some(percent))
+        } else {
+            (None, None, None, None)
+        };
 
     let remaining_percent = primary.and_then(|m| {
         m.current_interval_remaining_percent
             .map(clamp_percent)
             .or_else(|| percent_from_count_pair(remaining_count, total_count))
     });
+    let used_percent = remaining_percent
+        .map(|remaining| clamp_percent(100.0 - remaining))
+        .or(current_used_percent_from_counts);
 
     let (weekly_total, weekly_remaining, weekly_used, weekly_percent) = if let Some(m) = primary {
         let (total, used, remaining) = weekly_counts(m, semantics);
@@ -166,7 +181,9 @@ fn build_usage_data_from_payload(
         (None, None, None, None)
     };
 
-    let weekly_remaining_percent = select_weekly_remaining_percent(&models)
+    let weekly_remaining_percent = primary
+        .and_then(|m| m.current_weekly_remaining_percent.map(clamp_percent))
+        .or_else(|| select_weekly_remaining_percent(&models))
         .or_else(|| percent_from_count_pair(weekly_remaining, weekly_total));
     let weekly_percent = weekly_remaining_percent
         .map(|remaining| clamp_percent(100.0 - remaining))
@@ -275,12 +292,59 @@ fn build_usage_data_from_payload(
     }
 }
 
+pub fn apply_configured_quota_counts(
+    data: &mut UsageData,
+    current_quota_count: i64,
+    weekly_quota_count: i64,
+) {
+    if !data.ok {
+        return;
+    }
+
+    if data.total_count.unwrap_or(0) <= 0 {
+        if let Some(remaining_percent) = data.remaining_percent {
+            let (total, remaining, used) =
+                counts_from_remaining_percent(current_quota_count, remaining_percent);
+            data.total_count = Some(total);
+            data.remaining_count = Some(remaining);
+            data.used_count = Some(used);
+            data.used_percent = Some(clamp_percent(100.0 - remaining_percent));
+        }
+    }
+
+    if data.weekly_total_count.unwrap_or(0) <= 0 {
+        if let Some(remaining_percent) = data.weekly_remaining_percent {
+            let (total, remaining, used) =
+                counts_from_remaining_percent(weekly_quota_count, remaining_percent);
+            data.weekly_total_count = Some(total);
+            data.weekly_remaining_count = Some(remaining);
+            data.weekly_used_count = Some(used);
+            data.weekly_used_percent = Some(clamp_percent(100.0 - remaining_percent));
+        }
+    }
+}
+
+fn counts_from_remaining_percent(total: i64, remaining_percent: f64) -> (i64, i64, i64) {
+    let total = total.max(0);
+    let remaining = ((total as f64) * clamp_percent(remaining_percent) / 100.0).round() as i64;
+    let remaining = remaining.clamp(0, total);
+    (total, remaining, total.saturating_sub(remaining))
+}
+
 fn select_primary_model(models: &[ModelRemain]) -> Option<&ModelRemain> {
     models
         .iter()
-        .find(|m| has_current_quota_data(m))
+        .find(|m| is_general_model(m))
+        .or_else(|| models.iter().find(|m| has_current_quota_data(m)))
         .or_else(|| models.iter().find(|m| has_weekly_quota_data(m)))
         .or_else(|| models.first())
+}
+
+fn is_general_model(model: &ModelRemain) -> bool {
+    matches!(
+        model.model_name.as_deref(),
+        Some(name) if name.eq_ignore_ascii_case("general")
+    )
 }
 
 fn has_current_quota_data(model: &ModelRemain) -> bool {
@@ -373,7 +437,8 @@ fn fetch_minimax_payload_blocking_with_compat(
                 _ => Ok((primary_error_payload, UsageCountSemantics::Used)),
             }
         }
-        Err(primary_error) => match fetch_minimax_payload_blocking(api_key, timeout_ms, legacy_url) {
+        Err(primary_error) => match fetch_minimax_payload_blocking(api_key, timeout_ms, legacy_url)
+        {
             Ok(legacy_payload) => Ok((legacy_payload, UsageCountSemantics::Remaining)),
             Err(legacy_error) => Err(format!(
                 "{}; legacy coding_plan endpoint failed: {}",
@@ -631,16 +696,22 @@ mod tests {
     }
 
     #[test]
-    fn select_primary_model_skips_empty_leading_model() {
-        let models = vec![make_model("general", 0, 0, 0, 0), make_model("video", 3, 0, 21, 0)];
+    fn select_primary_model_prefers_general_model() {
+        let models = vec![
+            make_model("general", 0, 0, 0, 0),
+            make_model("video", 3, 0, 21, 0),
+        ];
 
         let primary = select_primary_model(&models).expect("primary model");
 
-        assert_eq!(primary.model_name.as_deref(), Some("video"));
+        assert_eq!(primary.model_name.as_deref(), Some("general"));
     }
 
     #[test]
-    fn payload_mapping_uses_non_empty_primary_model() {
+    fn payload_mapping_infers_counts_from_general_remaining_percent() {
+        let mut plan_model = make_model("general", 0, 0, 0, 0);
+        plan_model.current_interval_remaining_percent = Some(95.0);
+        plan_model.current_weekly_remaining_percent = Some(97.0);
         let payload = MiniMaxResponse {
             base_resp: Some(BaseResp {
                 status_code: Some(0),
@@ -648,23 +719,23 @@ mod tests {
             }),
             status_code: None,
             status_msg: None,
-            model_remains: Some(vec![
-                make_model("general", 0, 0, 0, 0),
-                make_model("video", 3, 0, 21, 0),
-            ]),
+            model_remains: Some(vec![plan_model, make_model("video", 3, 0, 21, 0)]),
         };
         let now = Local.with_ymd_and_hms(2026, 6, 1, 13, 40, 0).unwrap();
 
-        let usage = build_usage_data_from_payload(payload, now, UsageCountSemantics::Used);
+        let mut usage = build_usage_data_from_payload(payload, now, UsageCountSemantics::Used);
+        apply_configured_quota_counts(&mut usage, 1500, 15000);
 
         assert!(usage.ok);
-        assert_eq!(usage.primary_model_name, "video");
-        assert_eq!(usage.total_count, Some(3));
-        assert_eq!(usage.remaining_count, Some(3));
-        assert_eq!(usage.used_count, Some(0));
-        assert_eq!(usage.weekly_total_count, Some(21));
-        assert_eq!(usage.weekly_remaining_count, Some(21));
-        assert_eq!(usage.weekly_used_count, Some(0));
+        assert_eq!(usage.primary_model_name, "general");
+        assert_eq!(usage.total_count, Some(1500));
+        assert_eq!(usage.remaining_count, Some(1425));
+        assert_eq!(usage.used_count, Some(75));
+        assert_eq!(usage.used_percent, Some(5.0));
+        assert_eq!(usage.weekly_total_count, Some(15000));
+        assert_eq!(usage.weekly_remaining_count, Some(14550));
+        assert_eq!(usage.weekly_used_count, Some(450));
+        assert_eq!(usage.weekly_used_percent, Some(3.0));
         assert_eq!(usage.models.len(), 1);
         assert_eq!(usage.models[0].name, "video");
     }
@@ -716,7 +787,7 @@ mod tests {
     }
 
     #[test]
-    fn payload_mapping_uses_weekly_remaining_percent_from_any_model() {
+    fn payload_mapping_uses_weekly_remaining_percent_from_general_model() {
         let mut plan_model = make_model("general", 0, 0, 0, 0);
         plan_model.current_weekly_remaining_percent = Some(89.0);
         let mut video_model = make_model("video", 3, 0, 21, 0);
@@ -734,7 +805,7 @@ mod tests {
 
         let usage = build_usage_data_from_payload(payload, now, UsageCountSemantics::Used);
 
-        assert_eq!(usage.primary_model_name, "video");
+        assert_eq!(usage.primary_model_name, "general");
         assert_eq!(usage.weekly_remaining_percent, Some(89.0));
         assert_eq!(usage.weekly_used_percent, Some(11.0));
     }

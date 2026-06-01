@@ -13,6 +13,8 @@ pub struct ApiKeyView {
     pub keychain_service: String,
     pub keychain_account: String,
     pub refresh_interval: u32,
+    pub current_quota_count: i64,
+    pub weekly_quota_count: i64,
     pub created_at: i64,
     pub is_active: bool,
     pub masked_key: Option<String>,
@@ -47,11 +49,17 @@ fn api_key_view(entry: ApiKeyEntry) -> ApiKeyView {
         keychain_service: entry.keychain_service,
         keychain_account: entry.keychain_account,
         refresh_interval: entry.refresh_interval,
+        current_quota_count: entry.current_quota_count,
+        weekly_quota_count: entry.weekly_quota_count,
         created_at: entry.created_at,
         is_active: entry.is_active,
         masked_key,
         endpoint: entry.endpoint.clone(),
     }
+}
+
+fn normalize_quota_count(value: Option<i64>, fallback: i64) -> i64 {
+    value.unwrap_or(fallback).clamp(1, 100_000_000)
 }
 
 #[tauri::command]
@@ -136,9 +144,25 @@ pub fn cmd_clear_api_key(app: AppHandle, state: State<'_, AppState>) -> Result<(
 }
 
 #[tauri::command]
-pub async fn cmd_fetch_usage(api_key: String, timeout_ms: u64) -> Result<UsageData, String> {
+pub async fn cmd_fetch_usage(
+    state: State<'_, AppState>,
+    api_key: String,
+    timeout_ms: u64,
+) -> Result<UsageData, String> {
+    let (current_quota_count, weekly_quota_count) = {
+        let config = state.config.lock().unwrap();
+        (config.current_quota_count, config.weekly_quota_count)
+    };
     crate::api::fetch_minimax_usage(&api_key, timeout_ms, "domestic")
         .await
+        .map(|mut data| {
+            crate::api::apply_configured_quota_counts(
+                &mut data,
+                current_quota_count,
+                weekly_quota_count,
+            );
+            data
+        })
         .map_err(|e| e.to_string())
 }
 
@@ -201,6 +225,8 @@ pub async fn cmd_add_api_key(
     color: String,
     api_key: String,
     refresh_interval: u32,
+    current_quota_count: Option<i64>,
+    weekly_quota_count: Option<i64>,
     endpoint: Option<String>,
 ) -> Result<ApiKeyEntry, String> {
     // Validate key first
@@ -215,6 +241,14 @@ pub async fn cmd_add_api_key(
         return Err("Invalid API key: could not fetch usage data".to_string());
     }
 
+    let (fallback_current_quota_count, fallback_weekly_quota_count) = {
+        let config = state.config.lock().unwrap();
+        (config.current_quota_count, config.weekly_quota_count)
+    };
+    let current_quota_count =
+        normalize_quota_count(current_quota_count, fallback_current_quota_count);
+    let weekly_quota_count = normalize_quota_count(weekly_quota_count, fallback_weekly_quota_count);
+
     let entry = ApiKeyEntry {
         id: uuid::Uuid::new_v4().to_string(),
         name,
@@ -222,6 +256,8 @@ pub async fn cmd_add_api_key(
         keychain_service: "com.decard.minimax-monitor.keys".to_string(),
         keychain_account: uuid::Uuid::new_v4().to_string(),
         refresh_interval,
+        current_quota_count,
+        weekly_quota_count,
         created_at: chrono::Utc::now().timestamp(),
         is_active: true,
         endpoint: ep,
@@ -252,6 +288,8 @@ pub fn cmd_update_api_key(
     name: String,
     color: String,
     refresh_interval: u32,
+    current_quota_count: Option<i64>,
+    weekly_quota_count: Option<i64>,
     api_key: Option<String>,
     endpoint: Option<String>,
 ) -> Result<(), String> {
@@ -272,6 +310,13 @@ pub fn cmd_update_api_key(
         entry.name = name;
         entry.color = color;
         entry.refresh_interval = refresh_interval;
+        if let Some(value) = current_quota_count {
+            entry.current_quota_count =
+                normalize_quota_count(Some(value), entry.current_quota_count);
+        }
+        if let Some(value) = weekly_quota_count {
+            entry.weekly_quota_count = normalize_quota_count(Some(value), entry.weekly_quota_count);
+        }
         if let Some(ref ep) = endpoint {
             entry.endpoint = ep.clone();
         }
@@ -288,6 +333,8 @@ pub fn cmd_update_api_key(
             keychain_service: svc,
             keychain_account: acc,
             refresh_interval: 0,
+            current_quota_count: crate::state::default_current_quota_count(),
+            weekly_quota_count: crate::state::default_weekly_quota_count(),
             created_at: 0,
             is_active: false,
             endpoint: "domestic".to_string(),
@@ -342,13 +389,28 @@ pub fn cmd_delete_api_key(
 }
 
 #[tauri::command]
-pub async fn cmd_test_api_key(api_key: String) -> Result<UsageData, String> {
+pub async fn cmd_test_api_key(
+    state: State<'_, AppState>,
+    api_key: String,
+) -> Result<UsageData, String> {
+    let (current_quota_count, weekly_quota_count) = {
+        let config = state.config.lock().unwrap();
+        (config.current_quota_count, config.weekly_quota_count)
+    };
     tokio::time::timeout(
         std::time::Duration::from_secs(12),
         crate::api::fetch_minimax_usage(&api_key, 10000, "domestic"),
     )
     .await
     .map_err(|_| "API key test timed out".to_string())?
+    .map(|mut data| {
+        crate::api::apply_configured_quota_counts(
+            &mut data,
+            current_quota_count,
+            weekly_quota_count,
+        );
+        data
+    })
     .map_err(|e| e.to_string())
 }
 
@@ -433,7 +495,16 @@ pub async fn cmd_refresh_all_usage_data(
                     )
                     .await
                     {
-                        Ok(result) => result.map_err(|e| e.to_string()),
+                        Ok(result) => result
+                            .map(|mut data| {
+                                crate::api::apply_configured_quota_counts(
+                                    &mut data,
+                                    entry.current_quota_count,
+                                    entry.weekly_quota_count,
+                                );
+                                data
+                            })
+                            .map_err(|e| e.to_string()),
                         Err(_) => Err("Usage fetch timed out".to_string()),
                     }
                 }
