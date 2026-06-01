@@ -3,7 +3,7 @@
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
   "icon": "images/icon.png",
-  "version": "0.0.13",
+  "version": "0.0.14",
   "publisher": "decard",
   "license": "MIT",
   "repository": {

@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.0.14
+
+- 支持 MiniMax Token Plan 新用量接口 `/v1/token_plan/remains`，并保留旧 `coding_plan/remains` 回退。
+- 修复 `current_weekly_remaining_percent` 解析和周剩余额度展示。
+- 修复 macOS 托盘栏周剩余额度百分比显示。
+- 允许 Tauri IPC CSP 连接，修复桌面端 IPC 受限问题。
+
 ## 0.0.13
 
 - VS Code Marketplace 扩展标识改为 `decard.minimax-monitor`
