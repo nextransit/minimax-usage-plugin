@@ -737,13 +737,7 @@ function setupUiHandlers() {
   document.getElementById('btn-close-modal')?.addEventListener('click', () => {
     setDialogVisibility('key-management-modal', false);
   });
-
-  // Key edit dialog overlay click
-  document.getElementById('key-edit-dialog')?.addEventListener('click', (e) => {
-    if (e.target.classList.contains('dialog-overlay')) {
-      closeKeyEditDialog();
-    }
-  });
+  document.getElementById('btn-close-key-edit')?.addEventListener('click', closeKeyEditDialog);
 
   // 使用事件委托 - 在 key-management-modal 上绑定事件，处理动态生成的 key-list
   document.getElementById('key-management-modal')?.addEventListener('click', (e) => {

@@ -1013,6 +1013,11 @@ body {
   padding-top: 34px;
 }
 
+.key-edit-dialog {
+  position: relative;
+  padding-top: 34px;
+}
+
 .dialog-close-button {
   position: absolute;
   top: 10px;
