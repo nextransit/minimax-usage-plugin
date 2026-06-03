@@ -45,21 +45,25 @@ Manage multiple API keys at the same time. The status bar shows independent `ALL
 
 ![Multi API Key Management](./images/screenshot-multi-key.png)
 
+### Friendly Long-Period Progress Bar
+
+The weekly usage bar (the slowest-moving one) now ships with a brand-tinted translucent track, a 25% dashed scale, a subtle shimmer and breathing glow on the filled portion, and a "current time" marker that turns from green to amber when your usage is running ahead of the week. Even at 1% you can tell the system is alive, and you can tell at a glance whether you still have headroom for the week.
+
 ### Smart Hover Preview
 
-Hover over the status bar to inspect used / remaining / percentage data per key, with high-usage keys highlighted for quick review.
+Hover over the status bar to inspect used / used percentage data per key, with high-usage keys highlighted for quick review.
 
 ![Hover Preview](./images/screenshot-hover.png)
 
 ### Details Panel
 
-Click the status bar entry to open the details panel and inspect current-window quota, weekly usage, per-model tables, and risk warnings.
+Click the status bar entry to open the details panel and inspect current-window usage, weekly usage, per-model tables, and risk warnings.
 
 ![Details Panel](./images/screenshot-details.png)
 
 ### Status Bar Summary
 
-The status bar shows the selected key's current usage percentage and can optionally include weekly progress.
+The status bar shows the selected key's current usage percentage and can optionally include weekly usage progress.
 
 ![Status Bar](./images/screenshot-statusbar.png)
 

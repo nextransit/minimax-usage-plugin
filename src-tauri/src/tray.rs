@@ -151,8 +151,8 @@ fn tray_i18n(language: &str) -> TrayI18n {
             check_update: "检查更新...",
             model_prefix: "模型",
             interval_prefix: "周期",
-            remaining_prefix: "剩余",
-            weekly_remaining_prefix: "本周剩余",
+            remaining_prefix: "已使用",
+            weekly_remaining_prefix: "本周已使用",
             updated_prefix: "更新时间",
         }
     } else {
@@ -168,8 +168,8 @@ fn tray_i18n(language: &str) -> TrayI18n {
             check_update: "Check for Updates...",
             model_prefix: "Model",
             interval_prefix: "Interval",
-            remaining_prefix: "Remaining",
-            weekly_remaining_prefix: "Weekly Left",
+            remaining_prefix: "Used",
+            weekly_remaining_prefix: "Weekly Used",
             updated_prefix: "Updated",
         }
     }
@@ -217,6 +217,7 @@ impl SummaryUsageData {
         let mut weekly_used_count = 0i64;
         let mut max_used_percent: Option<f64> = None;
         let mut min_weekly_remaining_percent: Option<f64> = None;
+        let mut max_weekly_used_percent: Option<f64> = None;
         let mut has_any_data = false;
 
         // 遍历所有配置的 API Key
@@ -252,6 +253,13 @@ impl SummaryUsageData {
                     if let Some(cnt) = data.weekly_used_count {
                         weekly_used_count += cnt;
                     }
+                    if let Some(pct) = data.weekly_used_percent {
+                        max_weekly_used_percent = Some(
+                            max_weekly_used_percent
+                                .map(|current| current.max(pct))
+                                .unwrap_or(pct),
+                        );
+                    }
                     if let Some(pct) = data.weekly_remaining_percent {
                         min_weekly_remaining_percent = Some(
                             min_weekly_remaining_percent
@@ -279,13 +287,14 @@ impl SummaryUsageData {
             summary.weekly_total_count = Some(weekly_total_count);
             summary.weekly_remaining_count = Some(weekly_remaining_count);
             summary.weekly_used_count = Some(weekly_used_count);
-            summary.weekly_used_percent =
-                Some((weekly_used_count as f64 / weekly_total_count as f64) * 100.0);
+            summary.weekly_used_percent = max_weekly_used_percent.or(Some(
+                (weekly_used_count as f64 / weekly_total_count as f64) * 100.0,
+            ));
             summary.weekly_remaining_percent = min_weekly_remaining_percent.or_else(|| {
                 Some((weekly_remaining_count as f64 / weekly_total_count as f64) * 100.0)
             });
         } else if has_any_data {
-            summary.weekly_used_percent = Some(0.0);
+            summary.weekly_used_percent = max_weekly_used_percent;
             summary.weekly_remaining_percent = min_weekly_remaining_percent;
         }
 
@@ -302,11 +311,11 @@ fn format_summary_tray_usage(summary: &SummaryUsageData) -> Option<String> {
     }
 
     // 如果没有任何加载的数据，返回 key 数量
-    if summary.used_percent.is_none() && summary.weekly_remaining_percent.is_none() {
+    if summary.used_percent.is_none() && summary.weekly_used_percent.is_none() {
         return Some(format!("{}🔑", summary.active_keys_count));
     }
 
-    format_tray_usage(summary.used_percent, summary.weekly_remaining_percent)
+    format_tray_usage(summary.used_percent, summary.weekly_used_percent)
 }
 
 fn format_percent(percent: Option<f64>) -> Option<String> {
@@ -353,14 +362,14 @@ pub fn build_tooltip(usage: &UsageData, i18n: &TrayI18n) -> String {
     if let Some(pct) = usage.used_percent {
         parts.push(format!("Used: {:.0}%", pct));
     }
-    if let Some(wk_remaining) = usage.weekly_remaining_count {
+    if let Some(wk_used) = usage.weekly_used_count {
         parts.push(format!(
             "{}: {}",
-            i18n.weekly_remaining_prefix, wk_remaining
+            i18n.weekly_remaining_prefix, wk_used
         ));
     }
-    if let Some(wk_pct) = usage.weekly_remaining_percent {
-        parts.push(format!("Weekly Left: {:.0}%", wk_pct));
+    if let Some(wk_pct) = usage.weekly_used_percent {
+        parts.push(format!("Weekly Used: {:.0}%", wk_pct));
     }
     parts.join("\n")
 }
@@ -483,11 +492,11 @@ pub fn update_tray_menu(app: &AppHandle, state: &AppState) {
                 items.insert(3, Box::new(interval_item));
             }
 
-            if let Some(remaining) = data.remaining_count {
+            if let Some(used) = data.used_count {
                 let remaining_item = MenuItem::with_id(
                     app,
                     "remaining",
-                    format!("{}: {}", i18n.remaining_prefix, remaining),
+                    format!("{}: {}", i18n.remaining_prefix, used),
                     false,
                     None::<&str>,
                 )
@@ -495,17 +504,17 @@ pub fn update_tray_menu(app: &AppHandle, state: &AppState) {
                 items.insert(4, Box::new(remaining_item));
             }
 
-            if let Some(ref weekly_remaining) = data.weekly_remaining_count {
+            if let Some(ref weekly_used) = data.weekly_used_count {
                 let weekly_label = data
-                    .weekly_remaining_percent
+                    .weekly_used_percent
                     .map(|pct| {
                         format!(
                             "{}: {} ({:.0}%)",
-                            i18n.weekly_remaining_prefix, weekly_remaining, pct
+                            i18n.weekly_remaining_prefix, weekly_used, pct
                         )
                     })
                     .unwrap_or_else(|| {
-                        format!("{}: {}", i18n.weekly_remaining_prefix, weekly_remaining)
+                        format!("{}: {}", i18n.weekly_remaining_prefix, weekly_used)
                     });
                 let weekly_item =
                     MenuItem::with_id(app, "weekly_remaining", weekly_label, false, None::<&str>)
@@ -863,7 +872,7 @@ mod tests {
         assert_eq!(summary.weekly_remaining_percent, Some(89.0));
         assert_eq!(
             format_summary_tray_usage(&summary).as_deref(),
-            Some("0%/89%")
+            Some("0%/11%")
         );
     }
 
@@ -881,7 +890,7 @@ mod tests {
 
         assert_eq!(
             format_summary_tray_usage(&summary).as_deref(),
-            Some("0%/76%")
+            Some("0%/24%")
         );
     }
 }

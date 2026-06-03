@@ -238,7 +238,7 @@ const i18n = {
     used: '已使用',
     left: '剩余量',
     total: '总额度',
-    weeklyQuota: '周剩余额度',
+    weeklyQuota: '周使用额度',
     modelDetails: '模型明细',
     topItems: '前',
     itemsSuffix: '项',
@@ -347,7 +347,7 @@ const i18n = {
     used: 'USED',
     left: 'LEFT',
     total: 'TOTAL',
-    weeklyQuota: 'WEEKLY REMAINING',
+    weeklyQuota: 'WEEKLY USAGE',
     modelDetails: 'MODEL DETAILS',
     topItems: 'TOP',
     itemsSuffix: 'ITEMS',
@@ -1260,16 +1260,18 @@ function renderAggregateView() {
   }
 
   // WEEKLY aggregate
-  const weeklyPercent = typeof m.weeklyRemainingPercent === 'number'
-    ? clampPercent(m.weeklyRemainingPercent)
-    : (m.weeklyTotal > 0 ? clampPercent((m.weeklyRemaining / m.weeklyTotal) * 100) : 0);
-  const weeklyStatus = getRemainingStatus(weeklyPercent);
+  const weeklyPercent = m.weeklyTotal > 0
+    ? clampPercent((m.weeklyUsed / m.weeklyTotal) * 100)
+    : (m.weeklyUsedPercent ?? 0);
+  const weeklyStatus = getStatus(weeklyPercent);
   setText('weekly-used', formatNumber(m.weeklyUsed));
   setFlipNumber('weekly-remaining-container', 'weekly-remaining', formatNumber(m.weeklyRemaining));
   setText('weekly-total', formatNumber(m.weeklyTotal));
   setText('weekly-percent', `${Math.round(weeklyPercent)}%`);
   setElementClass(document.getElementById('weekly-percent'), `progress-percent ${weeklyStatus}`);
-  updateProgressBar('weekly-card', 'weekly-progress', weeklyPercent, weeklyStatus);
+  updateProgressBar('weekly-card', 'weekly-progress', weeklyPercent, weeklyStatus, {
+    timePercent: getWeeklyCycleTimePercent(m.earliestWeeklyReset),
+  });
   updateRemainingBreath('weekly-remaining', 'weekly-remaining-wrapper', weeklyStatus);
 
   if (m.earliestWeeklyReset > 0) {
@@ -1341,16 +1343,15 @@ function renderKeyDetailCard(key) {
   const color = safeKeyColor(key.color);
   const data = state.usageData[key.id];
   const currentPct = percentFromUsage(data, 'used_count', 'total_count', 'used_percent');
-  const weeklyPct = percentFromRemaining(data, 'weekly_remaining_count', 'weekly_total_count', 'weekly_remaining_percent');
+  const weeklyPct = percentFromUsage(data, 'weekly_used_count', 'weekly_total_count', 'weekly_used_percent');
   const isHidden = key.is_active === false;
   const isLoading = state.pendingRefreshKeyIds.has(key.id);
-  console.log('[renderKeyDetailCard]', key.id, 'currentPct:', currentPct, 'weeklyPct:', weeklyPct, 'isLoading:', isLoading, 'dataKeys:', data ? Object.keys(data).filter(k => k.includes('count') || k.includes('percent')) : 'NO_DATA');
   const inlineError = state.perKeyError[key.id];
   const expanded = state.expandedKeyIds.has(key.id);
   const confirmingDelete = state.deleteConfirmKeyId === key.id;
 
   const currentStatus = data && data.ok ? getStatus(currentPct) : 'normal';
-  const weeklyStatus = data && data.ok ? getRemainingStatus(weeklyPct) : 'normal';
+  const weeklyStatus = data && data.ok ? getStatus(weeklyPct) : 'normal';
 
   const refreshSec = Math.max(1, Number(key.refresh_interval) || 20);
   const subtitle = data && data.ok
@@ -1381,16 +1382,10 @@ function renderKeyDetailCard(key) {
     `;
 
   const metricRow = (label, pct, status, used, total, reset, kindSuffix) => {
-    // shimmer 时不设内联样式，让 CSS breakdown-shimmer 规则（渐变 + width:100%）生效
-    // 非 shimmer：内联 width + 硬编码背景色
-    const fillStyle = isLoading
-      ? ''
-      : `width: ${clampPercent(pct)}%; background: ${status === 'critical' ? '#ff2e63' : (status === 'warning' ? '#f59e0b' : color)};`;
-
     return `
-    <div class="breakdown-metric-row ${status} ${isLoading ? 'breakdown-shimmer' : ''}">
+    <div class="breakdown-metric-row ${status} ${isLoading ? 'breakdown-shimmer' : ''}" style="--metric-scale: ${formatMetricScale(pct)};">
       <span class="metric-label">${label}</span>
-      <div class="metric-bar"><div class="metric-bar-fill" style="${fillStyle}"></div></div>
+      <div class="metric-bar"><div class="metric-bar-fill"></div></div>
       <span class="metric-pct">${data && data.ok ? Math.round(pct) + '%' : '—'}</span>
       <span class="metric-numbers">${data && data.ok ? `${formatNumber(used)} / ${formatNumber(total)}` : '—'}</span>
       <span class="metric-reset" data-timestamp="${reset || 0}" data-reset-kind="${kindSuffix}">${reset > 0 ? formatCountdown(reset) : '&nbsp;'}</span>
@@ -1453,7 +1448,7 @@ function renderKeyDetailCard(key) {
         </div>
         ${errorBlock}
         ${metricRow(t('currentInterval'), currentPct, currentStatus, data?.used_count, data?.total_count, data?.reset_timestamp, 'current')}
-        ${metricRow(t('weeklyQuota'), weeklyPct, weeklyStatus, data?.weekly_remaining_count, data?.weekly_total_count, data?.weekly_reset_timestamp, 'weekly')}
+        ${metricRow(t('weeklyQuota'), weeklyPct, weeklyStatus, data?.weekly_used_count, data?.weekly_total_count, data?.weekly_reset_timestamp, 'weekly')}
         ${expandBlock}
       </div>
       ${confirmBubble}
@@ -1515,15 +1510,17 @@ function renderSingleKeyView(keyId) {
     setElementAttr(document.getElementById('window-countdown'), 'data-timestamp', data.reset_timestamp);
   }
 
-  const weeklyPercent = percentFromRemaining(data, 'weekly_remaining_count', 'weekly_total_count', 'weekly_remaining_percent');
-  const weeklyStatus = data && data.ok ? getRemainingStatus(weeklyPercent) : 'normal';
+  const weeklyPercent = percentFromUsage(data, 'weekly_used_count', 'weekly_total_count', 'weekly_used_percent');
+  const weeklyStatus = data && data.ok ? getStatus(weeklyPercent) : 'normal';
 
   setText('weekly-used', data && data.ok ? formatNumber(data.weekly_used_count) : '—');
   setFlipNumber('weekly-remaining-container', 'weekly-remaining', data && data.ok ? formatNumber(data.weekly_remaining_count) : '—');
   setText('weekly-total', data && data.ok ? formatNumber(data.weekly_total_count) : '—');
   setText('weekly-percent', data && data.ok ? `${Math.round(weeklyPercent)}%` : '--%');
   setElementClass(document.getElementById('weekly-percent'), `progress-percent ${weeklyStatus}`);
-  updateProgressBar('weekly-card', 'weekly-progress', weeklyPercent, weeklyStatus);
+  updateProgressBar('weekly-card', 'weekly-progress', weeklyPercent, weeklyStatus, {
+    timePercent: getWeeklyCycleTimePercent(data?.weekly_reset_timestamp),
+  });
   updateRemainingBreath('weekly-remaining', 'weekly-remaining-wrapper', weeklyStatus);
   if (data && data.weekly_reset_timestamp) {
     setElementAttr(document.getElementById('weekly-countdown'), 'data-timestamp', data.weekly_reset_timestamp);
@@ -1806,7 +1803,7 @@ function renderModelDetails(data) {
   }
 }
 
-function updateProgressBar(cardId, progressId, percent, status) {
+function updateProgressBar(cardId, progressId, percent, status, options = {}) {
   const card = document.getElementById(cardId);
   const progress = document.getElementById(progressId);
   const normalizedStatus = status || 'normal';
@@ -1815,7 +1812,8 @@ function updateProgressBar(cardId, progressId, percent, status) {
 
   setElementClass(card, `cyber-card ${isWeeklyProgress ? 'secondary ' : ''}${normalizedStatus}`);
   if (progress) {
-    const width = `${clampPercent(percent)}%`;
+    const safePercent = clampPercent(percent);
+    const width = `${safePercent}%`;
     if (progress.style.width !== width) {
       progress.style.width = width;
     }
@@ -1836,7 +1834,21 @@ function updateProgressBar(cardId, progressId, percent, status) {
     }
     progress.style.background = background;
 
-    setElementClass(progress, `progress-thumb ${isWeeklyProgress ? 'secondary ' : ''}${normalizedStatus}`);
+    const lowUsageClass = safePercent > 0 && safePercent < 6 ? ' low-usage' : '';
+    setElementClass(progress, `progress-thumb ${isWeeklyProgress ? 'secondary ' : ''}${normalizedStatus}${lowUsageClass}`);
+  }
+
+  const marker = document.getElementById(`${progressId}-time-marker`);
+  if (marker) {
+    const timePercent = typeof options.timePercent === 'number'
+      ? clampPercent(options.timePercent)
+      : null;
+    marker.style.display = timePercent === null ? 'none' : 'block';
+    if (timePercent !== null) {
+      marker.style.left = `${timePercent}%`;
+      const usagePercent = clampPercent(percent);
+      setElementClass(marker, `progress-time-marker ${usagePercent > timePercent ? 'ahead' : 'behind'}`);
+    }
   }
 }
 
@@ -1927,7 +1939,7 @@ function getAggregateMetrics() {
     used: 0, remaining: 0, total: 0,
     weeklyUsed: 0, weeklyRemaining: 0, weeklyTotal: 0,
     usedPercent: null,
-    weeklyRemainingPercent: null,
+    weeklyUsedPercent: null,
     earliestReset: 0, earliestWeeklyReset: 0,
     primaryModel: '', intervalLabel: '',
     hasData: false,
@@ -1948,11 +1960,11 @@ function getAggregateMetrics() {
         ? pct
         : Math.max(totals.usedPercent, pct);
     }
-    if (typeof data.weekly_remaining_percent === 'number' && Number.isFinite(data.weekly_remaining_percent)) {
-      const pct = clampPercent(data.weekly_remaining_percent);
-      totals.weeklyRemainingPercent = totals.weeklyRemainingPercent === null
+    if (typeof data.weekly_used_percent === 'number' && Number.isFinite(data.weekly_used_percent)) {
+      const pct = clampPercent(data.weekly_used_percent);
+      totals.weeklyUsedPercent = totals.weeklyUsedPercent === null
         ? pct
-        : Math.min(totals.weeklyRemainingPercent, pct);
+        : Math.max(totals.weeklyUsedPercent, pct);
     }
     if (data.reset_timestamp && (totals.earliestReset === 0 || data.reset_timestamp < totals.earliestReset)) {
       totals.earliestReset = data.reset_timestamp;
@@ -2104,6 +2116,15 @@ function hexToRgba(color, alpha) {
 function clampPercent(value) {
   if (value === null || value === undefined || isNaN(value)) return 0;
   return Math.min(100, Math.max(0, value));
+}
+
+function getWeeklyCycleTimePercent(resetTimestamp, now = Date.now()) {
+  const reset = Number(resetTimestamp);
+  if (!Number.isFinite(reset) || reset <= 0) return null;
+
+  const weekMs = 7 * 24 * 60 * 60 * 1000;
+  const start = reset - weekMs;
+  return clampPercent(((now - start) / weekMs) * 100);
 }
 
 function getStatus(percent) {
