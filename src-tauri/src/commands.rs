@@ -587,44 +587,98 @@ pub async fn cmd_refresh_all_usage_data(
     Ok(usage)
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct UpdateAvailableInfo {
+    pub version: String,
+    pub notes: Option<String>,
+    pub pub_date: Option<String>,
+}
+
+/// 检测是否有可用更新,返回 UpdateAvailableInfo 给前端(只 check,不下载)
 #[tauri::command]
-pub async fn cmd_check_update(app: AppHandle) -> Result<String, String> {
+pub async fn cmd_check_update(app: AppHandle) -> Result<UpdateAvailableInfo, String> {
     let updater = app.updater().map_err(|e| e.to_string())?;
-
     let update = updater.check().await.map_err(|e| e.to_string())?;
-
     match update {
-        Some(update) => {
-            let version = update.version.clone();
-            log::info!(
-                "Manual update check: found new version v{}, downloading...",
-                version
-            );
-            // Background download, don't block response
-            let version_for_log = version.clone();
-            tauri::async_runtime::spawn(async move {
-                match update
-                    .download_and_install(|_chunk, _total| {}, || {})
-                    .await
-                {
-                    Ok(_) => {
-                        log::info!(
-                            "Manual update: v{} downloaded, will install on next restart",
-                            version_for_log
-                        );
-                    }
-                    Err(e) => {
-                        log::warn!("Manual update: download failed: {}", e);
-                    }
-                }
-            });
-            Ok(version)
-        }
-        None => {
-            log::info!("Manual update check: already on latest version");
-            Ok("none".into())
-        }
+        Some(update) => Ok(UpdateAvailableInfo {
+            version: update.version,
+            notes: update.body,
+            pub_date: update.date.map(|d| d.to_string()),
+        }),
+        None => Err("none".into()),
     }
+}
+
+/// 用户点击"升级"按钮:开始后台下载 + 安装;通过 progress/downloaded 事件回报状态
+#[tauri::command]
+pub async fn cmd_download_and_install_update(app: AppHandle, version: String) -> Result<(), String> {
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    let update = updater.check().await.map_err(|e| e.to_string())?;
+    let Some(update) = update else {
+        return Err("no_update".into());
+    };
+
+    if update.version != version {
+        return Err(format!(
+            "version mismatch: requested {} but updater has {}",
+            version, update.version
+        ));
+    }
+
+    let app_h = app.clone();
+    let v = version.clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = app_h.emit(
+            "update-download-started",
+            serde_json::json!({ "version": v.clone() }),
+        );
+        let progress_app = app_h.clone();
+        let v_for_closure = v.clone();
+        let result = update
+            .download_and_install(
+                move |chunk, total| {
+                    let _ = progress_app.emit(
+                        "update-download-progress",
+                        serde_json::json!({
+                            "version": v_for_closure.clone(),
+                            "chunk": chunk,
+                            "total": total,
+                        }),
+                    );
+                },
+                || {},
+            )
+            .await;
+        match result {
+            Ok(_) => {
+                log::info!(
+                    "Auto-update: v{} downloaded, will install on next restart",
+                    v
+                );
+                let _ = app_h.emit(
+                    "update-download-finished",
+                    serde_json::json!({ "version": v }),
+                );
+            }
+            Err(e) => {
+                log::warn!("Auto-update: download failed: {}", e);
+                let _ = app_h.emit(
+                    "update-download-failed",
+                    serde_json::json!({ "version": v, "error": e.to_string() }),
+                );
+            }
+        }
+    });
+
+    Ok(())
+}
+
+/// 下载完成后,用户点"重启"按钮调用:退出进程,
+/// tauri-plugin-updater 会在下次启动时应用已下载的更新包(macOS/Linux)。
+#[tauri::command]
+pub fn cmd_restart_app(app: AppHandle) {
+    log::info!("User requested restart to apply update");
+    app.exit(0);
 }
 
 #[cfg(test)]

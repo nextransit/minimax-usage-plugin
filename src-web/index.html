@@ -393,6 +393,36 @@
     </div>
   </div>
   <div id="copy-toast" class="copy-toast" role="status" aria-live="polite">--</div>
+
+  <!-- Update Available Dialog -->
+  <div id="update-dialog" class="dialog-overlay" style="display: none;">
+    <div class="dialog update-dialog" role="dialog" aria-modal="true" aria-labelledby="update-dialog-title">
+      <h2 id="update-dialog-title">
+        <span class="update-icon">⬆️</span>
+        <span data-i18n="updateAvailable">New version available</span>
+      </h2>
+      <div class="update-version-row">
+        <span data-i18n="updateVersionLabel">Latest version</span>
+        <span id="update-version" class="update-version-value">--</span>
+      </div>
+      <div id="update-notes-container" class="update-notes-container">
+        <div class="update-notes-title" data-i18n="updateChangelog">Changelog</div>
+        <pre id="update-notes" class="update-notes"></pre>
+      </div>
+      <div class="update-progress" id="update-progress" style="display: none;">
+        <div class="update-progress-bar"><div id="update-progress-fill" class="update-progress-fill"></div></div>
+        <div id="update-progress-label" class="update-progress-label" data-i18n="updateDownloading">Downloading...</div>
+      </div>
+      <div id="update-finished-hint" class="update-finished-hint" style="display: none;" data-i18n="updateRestartHint">
+        Download complete. Please restart the app to apply the update.
+      </div>
+      <div class="dialog-actions update-actions">
+        <button id="btn-update-later" class="btn" data-i18n="updateLater">Later</button>
+        <button id="btn-update-now" class="btn btn-neon" data-i18n="updateNow">Update now</button>
+      </div>
+    </div>
+  </div>
+
   <script src="tauri-bridge.js"></script>
   <script src="app.js"></script>
 </body>

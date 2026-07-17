@@ -4,6 +4,7 @@ const transientDialogIds = [
   'api-key-dialog',
   'key-management-modal',
   'key-edit-dialog',
+  'update-dialog',
 ];
 const DIALOG_OPEN_ATTR = 'data-minimax-dialog-open';
 const RISK_REMAINING_RATIO_THRESHOLD = 0.10;
@@ -308,6 +309,15 @@ const i18n = {
     breakdownTitle: '密钥明细',
     aggregateTitle: '全部聚合',
     resetIn: '重置于',
+    updateAvailable: '发现新版本',
+    updateVersionLabel: '最新版本',
+    updateChangelog: '更新日志',
+    updateDownloading: '正在下载...',
+    updateRestartHint: '下载完成，请重启应用以完成升级',
+    updateLater: '稍后',
+    updateNow: '立即升级',
+    updateDownloadFailed: '下载失败，请稍后重试',
+    updateAlreadyLatest: '已是最新版本',
     secondAgoUnit: '秒',
     minuteAgoUnit: '分',
     hourAgoUnit: '时',
@@ -417,6 +427,15 @@ const i18n = {
     breakdownTitle: 'PER-KEY BREAKDOWN',
     aggregateTitle: 'AGGREGATE',
     resetIn: 'RESET in',
+    updateAvailable: 'New version available',
+    updateVersionLabel: 'Latest version',
+    updateChangelog: 'Changelog',
+    updateDownloading: 'Downloading...',
+    updateRestartHint: 'Download complete. Please restart the app to apply the update.',
+    updateLater: 'Later',
+    updateNow: 'Update now',
+    updateDownloadFailed: 'Download failed. Please try again later.',
+    updateAlreadyLatest: 'Already on the latest version',
     secondAgoUnit: 's',
     minuteAgoUnit: 'm',
     hourAgoUnit: 'h',
@@ -441,6 +460,9 @@ let state = {
   pendingRefreshKeyIds: new Set(),            // 单 key 刷新时的 loading 状态
   hiddenInRefreshDraft: new Set(),            // 👁 切换的乐观状态
   deleteConfirmKeyId: null,                   // 当前行内删除确认气泡指向的 key
+  pendingUpdate: null,                        // { version, notes, pub_date } 当前弹窗中的更新
+  updateDownloading: false,                   // 升级下载进行中
+  updateDownloadFinished: false,              // 下载完成,等待用户重启
 };
 
 // Settings state
@@ -633,6 +655,49 @@ async function setupEventListeners() {
   await tauriListen('window-hidden', () => {
     closeTransientDialogs();
   });
+
+  // ── Auto-update events ────────────────────────────────────────────────────
+  // 检测到新版本时由后端 emit update-available,前端展示 changelog + [升级]/[稍后]
+  await tauriListen('update-available', (event) => {
+    const payload = event.payload || {};
+    if (!payload.version) return;
+    if (state.pendingUpdate && state.pendingUpdate.version === payload.version) return;
+    state.pendingUpdate = {
+      version: String(payload.version),
+      notes: typeof payload.notes === 'string' ? payload.notes : '',
+      pub_date: payload.pub_date || null,
+    };
+    state.updateDownloading = false;
+    state.updateDownloadFinished = false;
+    showUpdateDialog();
+  });
+
+  await tauriListen('update-download-started', () => {
+    state.updateDownloading = true;
+    state.updateDownloadFinished = false;
+    renderUpdateDialog();
+  });
+
+  await tauriListen('update-download-progress', (event) => {
+    const payload = event.payload || {};
+    const chunk = Number(payload.chunk) || 0;
+    const total = Number(payload.total) || 0;
+    const pct = total > 0 ? Math.min(100, Math.round((chunk / total) * 100)) : null;
+    renderUpdateDialog({ progressPercent: pct });
+  });
+
+  await tauriListen('update-download-finished', () => {
+    state.updateDownloading = false;
+    state.updateDownloadFinished = true;
+    renderUpdateDialog();
+  });
+
+  await tauriListen('update-download-failed', () => {
+    state.updateDownloading = false;
+    state.updateDownloadFinished = false;
+    alert(t('updateDownloadFailed'));
+    hideUpdateDialog();
+  });
 }
 
 function showStartupError(error, options = {}) {
@@ -810,6 +875,16 @@ function setupUiHandlers() {
     state.selectedKeyId = target;
     try { localStorage.setItem('lastSelectedKeyId', target); } catch (_) { /* ignore */ }
     scheduleRender();
+  });
+
+  // Update dialog buttons
+  document.getElementById('btn-update-later')?.addEventListener('click', (e) => {
+    if (!e.isTrusted) return;
+    hideUpdateDialog();
+  });
+  document.getElementById('btn-update-now')?.addEventListener('click', async (e) => {
+    if (!e.isTrusted) return;
+    await startUpdateDownload();
   });
 }
 
@@ -2542,3 +2617,101 @@ if (document.readyState === 'loading') {
 } else {
   init();
 }
+
+// ── Auto-update dialog ──────────────────────────────────────────────────────
+
+function showUpdateDialog() {
+  const dialog = document.getElementById('update-dialog');
+  if (!dialog) return;
+  // 升级对话框优先级最高 — 关闭其它瞬态对话框避免遮挡
+  closeTransientDialogs();
+  setDialogVisibility('update-dialog', true);
+  renderUpdateDialog();
+}
+
+function hideUpdateDialog() {
+  const dialog = document.getElementById('update-dialog');
+  if (!dialog) return;
+  setDialogVisibility('update-dialog', false);
+  // 用户点"稍后"后清掉 pendingUpdate,避免下次后端再次 emit 时不弹窗
+  if (!state.updateDownloading) {
+    state.pendingUpdate = null;
+    state.updateDownloadFinished = false;
+  }
+}
+
+function renderUpdateDialog(options = {}) {
+  const update = state.pendingUpdate;
+  if (!update) return;
+
+  const versionEl = document.getElementById('update-version');
+  if (versionEl) versionEl.textContent = `v${update.version}`;
+
+  const notesEl = document.getElementById('update-notes');
+  if (notesEl) {
+    notesEl.textContent = update.notes && update.notes.trim()
+      ? update.notes
+      : t('updateAlreadyLatest');
+  }
+
+  const progressBox = document.getElementById('update-progress');
+  const progressFill = document.getElementById('update-progress-fill');
+  if (progressBox) {
+    const showProgress = state.updateDownloading && !state.updateDownloadFinished;
+    progressBox.style.display = showProgress ? 'block' : 'none';
+    if (showProgress) {
+      const pct = typeof options.progressPercent === 'number'
+        ? Math.max(0, Math.min(100, options.progressPercent))
+        : 0;
+      if (progressFill) progressFill.style.width = `${pct}%`;
+    }
+  }
+
+  const finishedHint = document.getElementById('update-finished-hint');
+  if (finishedHint) {
+    finishedHint.style.display = state.updateDownloadFinished ? 'block' : 'none';
+  }
+
+  const nowBtn = document.getElementById('btn-update-now');
+  const laterBtn = document.getElementById('btn-update-later');
+  if (nowBtn) {
+    if (state.updateDownloadFinished) {
+      nowBtn.disabled = false;
+      nowBtn.textContent = state.language === 'zh-CN' ? '立即重启' : 'Restart now';
+    } else {
+      nowBtn.disabled = state.updateDownloading;
+      nowBtn.textContent = t('updateNow');
+    }
+  }
+  if (laterBtn) {
+    laterBtn.disabled = state.updateDownloading;
+  }
+}
+
+async function startUpdateDownload() {
+  const update = state.pendingUpdate;
+  if (!update || !tauriInvoke) return;
+  if (state.updateDownloadFinished) {
+    // 用户点击"立即重启"
+    try {
+      await invokeWithTimeout('cmd_restart_app', undefined, WRITE_IPC_TIMEOUT_MS);
+    } catch (e) {
+      console.error('Failed to restart app:', e);
+    }
+    return;
+  }
+  if (state.updateDownloading) return;
+  try {
+    await invokeWithTimeout(
+      'cmd_download_and_install_update',
+      { version: update.version },
+      WRITE_IPC_TIMEOUT_MS,
+    );
+    // 后端会通过 update-download-started/progress/finished 事件回报
+  } catch (error) {
+    console.error('Failed to start update download:', error);
+    alert(t('updateDownloadFailed'));
+    hideUpdateDialog();
+  }
+}
+

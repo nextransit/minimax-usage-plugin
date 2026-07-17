@@ -446,7 +446,8 @@ pub fn run() {
 
             spawn_usage_refresh_loop(app_handle.clone());
 
-            // Auto-update: check for updates on startup (silent)
+            // Auto-update on startup: 检测到新版本时,emit 事件给前端,
+            // 由前端弹升级对话框(展示 changelog/notes);用户点击"升级"再下载。
             {
                 let update_handle = app_handle.clone();
                 tauri::async_runtime::spawn(async move {
@@ -457,23 +458,17 @@ pub fn run() {
                     match updater.check().await {
                         Ok(Some(update)) => {
                             log::info!(
-                                "Auto-update: found new version v{}, downloading...",
+                                "Auto-update: found new version v{}, awaiting user confirmation",
                                 update.version
                             );
-                            match update
-                                .download_and_install(|_chunk, _total| {}, || {})
-                                .await
-                            {
-                                Ok(_) => {
-                                    log::info!(
-                                        "Auto-update: v{} downloaded, will install on next restart",
-                                        update.version
-                                    );
-                                }
-                                Err(e) => {
-                                    log::warn!("Auto-update: download failed: {}", e);
-                                }
-                            }
+                            let _ = update_handle.emit(
+                                "update-available",
+                                serde_json::json!({
+                                    "version": update.version,
+                                    "notes": update.body,
+                                    "pub_date": update.date.map(|d| d.to_string()),
+                                }),
+                            );
                         }
                         Ok(None) => {
                             log::info!("Auto-update: already on latest version");
@@ -537,6 +532,8 @@ pub fn run() {
             cmd_get_all_usage_data,
             cmd_refresh_all_usage_data,
             cmd_check_update,
+            cmd_download_and_install_update,
+            cmd_restart_app,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

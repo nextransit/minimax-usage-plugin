@@ -60,7 +60,14 @@ npm run tauri:build
 
 # CI/unsigned release 构建
 npm run tauri:build:ci
+
+# 清理 Rust 构建缓存（Release 构建后回收磁盘空间）
+cd src-tauri && cargo clean
 ```
+
+### 构建后清理规范
+
+每次 Release 构建完成后，运行 `cd src-tauri && cargo clean` 清理 `target/` 目录（可回收 2-4 GiB 磁盘空间），避免缓存膨胀占用 SSD 空间。
 
 ### 状态流向
 
