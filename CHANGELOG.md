@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.0.19
+
+- 发现新版本后自动下载并安装，无需用户点击“立即升级”。
+- 更新安装完成后自动重启 App，支持锁屏和后台运行场景完成升级。
+
 ## 0.0.18
 
 - 修复启动时最小化场景下发现新版本但更新窗口不可见的问题。

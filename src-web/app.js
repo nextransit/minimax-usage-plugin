@@ -677,10 +677,11 @@ async function setupEventListeners() {
     renderUpdateDialog({ progressPercent: pct });
   });
 
-  await tauriListen('update-download-finished', () => {
+  await tauriListen('update-download-finished', async () => {
     state.updateDownloading = false;
     state.updateDownloadFinished = true;
     renderUpdateDialog();
+    await restartForInstalledUpdate();
   });
 
   await tauriListen('update-download-failed', () => {
@@ -712,6 +713,7 @@ async function applyAvailableUpdate(payload) {
   } catch (error) {
     console.warn('Failed to reveal update dialog window:', error);
   }
+  await startUpdateDownload();
 }
 
 async function checkForUpdates() {
@@ -2751,12 +2753,7 @@ async function startUpdateDownload() {
   const update = state.pendingUpdate;
   if (!update || !tauriInvoke) return;
   if (state.updateDownloadFinished) {
-    // 用户点击"立即重启"
-    try {
-      await invokeWithTimeout('cmd_restart_app', undefined, WRITE_IPC_TIMEOUT_MS);
-    } catch (e) {
-      console.error('Failed to restart app:', e);
-    }
+    await restartForInstalledUpdate();
     return;
   }
   if (state.updateDownloading) return;
@@ -2771,5 +2768,13 @@ async function startUpdateDownload() {
     console.error('Failed to start update download:', error);
     alert(t('updateDownloadFailed'));
     hideUpdateDialog();
+  }
+}
+
+async function restartForInstalledUpdate() {
+  try {
+    await invokeWithTimeout('cmd_restart_app', undefined, WRITE_IPC_TIMEOUT_MS);
+  } catch (error) {
+    console.error('Failed to restart app:', error);
   }
 }

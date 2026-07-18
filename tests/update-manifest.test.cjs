@@ -108,6 +108,9 @@ test("available update renders its dialog before revealing a hidden window", asy
     async invokeWithTimeout(command) {
       calls.push(command);
     },
+    async startUpdateDownload() {
+      calls.push("download");
+    },
   };
 
   vm.createContext(context);
@@ -122,8 +125,30 @@ globalThis.applyAvailableUpdateForTest = applyAvailableUpdate;`,
     notes: "hidden-window updater fix",
   });
 
-  assert.deepEqual(calls, ["dialog", "cmd_show_update_window"]);
+  assert.deepEqual(calls, ["dialog", "cmd_show_update_window", "download"]);
   assert.equal(context.state.pendingUpdate.version, "0.0.18");
+});
+
+test("installed update requests an automatic app restart", async () => {
+  const calls = [];
+  const context = {
+    console,
+    WRITE_IPC_TIMEOUT_MS: 5000,
+    async invokeWithTimeout(command) {
+      calls.push(command);
+    },
+  };
+
+  vm.createContext(context);
+  vm.runInContext(
+    `${extractFunction(appJs, "restartForInstalledUpdate")}
+globalThis.restartForInstalledUpdateForTest = restartForInstalledUpdate;`,
+    context,
+  );
+
+  await context.restartForInstalledUpdateForTest();
+
+  assert.deepEqual(calls, ["cmd_restart_app"]);
 });
 
 function createReleaseFixture(t) {
