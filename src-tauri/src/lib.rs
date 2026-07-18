@@ -310,13 +310,45 @@ fn spawn_usage_refresh_loop(app_h: tauri::AppHandle) {
     });
 }
 
-pub(crate) fn show_main_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
+fn reveal_main_window(app: &AppHandle, close_transient_dialogs: bool) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window not found".to_string())?;
+
+    log::info!(
+        "Main window reveal requested: close_transient_dialogs={}",
+        close_transient_dialogs
+    );
+    if close_transient_dialogs {
         let _ = window.emit("app-window-will-show", ());
         let _ = window.eval(CLOSE_TRANSIENT_DIALOGS_JS);
-        let _ = window.show();
-        let _ = window.set_focus();
     }
+
+    window
+        .show()
+        .map_err(|e| format!("failed to show main window: {}", e))?;
+    window
+        .unminimize()
+        .map_err(|e| format!("failed to unminimize main window: {}", e))?;
+    window
+        .set_focus()
+        .map_err(|e| format!("failed to focus main window: {}", e))?;
+
+    match window.is_visible() {
+        Ok(visible) => log::info!("Main window reveal result: visible={}", visible),
+        Err(e) => log::warn!("Failed to read main window visibility: {}", e),
+    }
+    Ok(())
+}
+
+pub(crate) fn show_main_window(app: &AppHandle) {
+    if let Err(e) = reveal_main_window(app, true) {
+        log::error!("Failed to reveal main window: {}", e);
+    }
+}
+
+pub(crate) fn show_update_window(app: &AppHandle) -> Result<(), String> {
+    reveal_main_window(app, false)
 }
 
 pub fn run() {
@@ -497,6 +529,7 @@ pub fn run() {
             cmd_get_all_usage_data,
             cmd_refresh_all_usage_data,
             cmd_check_update,
+            cmd_show_update_window,
             cmd_download_and_install_update,
             cmd_restart_app,
         ])

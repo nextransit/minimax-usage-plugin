@@ -4,9 +4,11 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
+const vm = require("node:vm");
 
 const projectRoot = path.resolve(__dirname, "..");
 const generatorPath = path.join(projectRoot, "scripts", "generate-update-json.js");
+const appJs = fs.readFileSync(path.join(projectRoot, "src-web", "app.js"), "utf8");
 
 test("update manifest uses signed updater artifacts instead of installers", (t) => {
   const fixture = createReleaseFixture(t);
@@ -68,6 +70,10 @@ test("Tauri and release workflow require signed updater artifacts", () => {
     path.join(projectRoot, "src-tauri", "src", "commands.rs"),
     "utf8",
   );
+  const lib = fs.readFileSync(
+    path.join(projectRoot, "src-tauri", "src", "lib.rs"),
+    "utf8",
+  );
 
   assert.equal(tauriConfig.bundle.createUpdaterArtifacts, true);
   assert.ok(tauriConfig.plugins.updater.pubkey);
@@ -78,6 +84,46 @@ test("Tauri and release workflow require signed updater artifacts", () => {
   assert.match(workflow, /\.sig/);
   assert.match(commands, /app\.restart\(\)/);
   assert.doesNotMatch(commands, /cmd_restart_app[\s\S]*?app\.exit\(0\)/);
+  assert.match(commands, /pub fn cmd_show_update_window/);
+  assert.match(lib, /cmd_show_update_window,/);
+  assert.doesNotMatch(
+    commands,
+    /cmd_check_update[\s\S]*?crate::show_main_window/,
+  );
+});
+
+test("available update renders its dialog before revealing a hidden window", async () => {
+  const calls = [];
+  const context = {
+    console,
+    state: {
+      pendingUpdate: null,
+      updateDownloading: false,
+      updateDownloadFinished: false,
+    },
+    WRITE_IPC_TIMEOUT_MS: 5000,
+    showUpdateDialog() {
+      calls.push("dialog");
+    },
+    async invokeWithTimeout(command) {
+      calls.push(command);
+    },
+  };
+
+  vm.createContext(context);
+  vm.runInContext(
+    `${extractFunction(appJs, "applyAvailableUpdate")}
+globalThis.applyAvailableUpdateForTest = applyAvailableUpdate;`,
+    context,
+  );
+
+  await context.applyAvailableUpdateForTest({
+    version: "0.0.18",
+    notes: "hidden-window updater fix",
+  });
+
+  assert.deepEqual(calls, ["dialog", "cmd_show_update_window"]);
+  assert.equal(context.state.pendingUpdate.version, "0.0.18");
 });
 
 function createReleaseFixture(t) {
@@ -135,4 +181,22 @@ function runGenerator(cwd) {
       GITHUB_REPOSITORY: "nextransit/minimax-usage-plugin",
     },
   });
+}
+
+function extractFunction(source, name) {
+  const asyncStart = source.indexOf(`async function ${name}(`);
+  const start = asyncStart >= 0 ? asyncStart : source.indexOf(`function ${name}(`);
+  assert.notEqual(start, -1, `Missing function ${name}`);
+  const paramsOpen = source.indexOf("(", start);
+  const paramsClose = source.indexOf(")", paramsOpen);
+  const open = source.indexOf("{", paramsClose);
+  let depth = 0;
+
+  for (let i = open; i < source.length; i += 1) {
+    if (source[i] === "{") depth += 1;
+    if (source[i] === "}") depth -= 1;
+    if (depth === 0) return source.slice(start, i + 1);
+  }
+
+  throw new Error(`Unable to extract function ${name}`);
 }

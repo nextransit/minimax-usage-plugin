@@ -607,7 +607,6 @@ pub async fn cmd_check_update(app: AppHandle) -> Result<UpdateAvailableInfo, Str
     match update {
         Some(update) => {
             log::info!("Update check: found new version v{}", update.version);
-            crate::show_main_window(&app);
             Ok(UpdateAvailableInfo {
                 version: update.version,
                 notes: update.body,
@@ -619,6 +618,16 @@ pub async fn cmd_check_update(app: AppHandle) -> Result<UpdateAvailableInfo, Str
             Err("none".into())
         }
     }
+}
+
+/// 更新弹窗渲染完成后显示主窗口,避免通用显示流程把弹窗关闭。
+#[tauri::command]
+pub fn cmd_show_update_window(app: AppHandle) -> Result<(), String> {
+    log::info!("Update dialog: requesting main window visibility");
+    crate::show_update_window(&app).map_err(|e| {
+        log::error!("Update dialog: failed to reveal main window: {}", e);
+        e
+    })
 }
 
 /// 用户点击"升级"按钮:开始后台下载 + 安装;通过 progress/downloaded 事件回报状态

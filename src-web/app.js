@@ -659,8 +659,8 @@ async function setupEventListeners() {
 
   // ── Auto-update events ────────────────────────────────────────────────────
   // 检测到新版本时由后端 emit update-available,前端展示 changelog + [升级]/[稍后]
-  await tauriListen('update-available', (event) => {
-    applyAvailableUpdate(event.payload);
+  await tauriListen('update-available', async (event) => {
+    await applyAvailableUpdate(event.payload);
   });
 
   await tauriListen('update-download-started', () => {
@@ -691,7 +691,7 @@ async function setupEventListeners() {
   });
 }
 
-function applyAvailableUpdate(payload) {
+async function applyAvailableUpdate(payload) {
   const update = payload || {};
   if (!update.version) return;
   if (state.pendingUpdate && state.pendingUpdate.version === update.version) return;
@@ -703,6 +703,15 @@ function applyAvailableUpdate(payload) {
   state.updateDownloading = false;
   state.updateDownloadFinished = false;
   showUpdateDialog();
+  try {
+    await invokeWithTimeout(
+      'cmd_show_update_window',
+      undefined,
+      WRITE_IPC_TIMEOUT_MS,
+    );
+  } catch (error) {
+    console.warn('Failed to reveal update dialog window:', error);
+  }
 }
 
 async function checkForUpdates() {
@@ -712,7 +721,7 @@ async function checkForUpdates() {
       undefined,
       REFRESH_IPC_TIMEOUT_MS,
     );
-    applyAvailableUpdate(update);
+    await applyAvailableUpdate(update);
   } catch (error) {
     if (String(error) !== 'none') {
       console.warn('Automatic update check failed:', error);
