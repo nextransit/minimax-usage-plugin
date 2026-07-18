@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.0.20
+
+- 补充自动更新准备、下载、安装和重启阶段的后端日志，便于后台与锁屏场景核验升级状态。
+
 ## 0.0.19
 
 - 发现新版本后自动下载并安装，无需用户点击“立即升级”。

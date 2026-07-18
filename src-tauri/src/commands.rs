@@ -636,6 +636,7 @@ pub async fn cmd_download_and_install_update(
     app: AppHandle,
     version: String,
 ) -> Result<(), String> {
+    log::info!("Auto-update: preparing v{}", version);
     let updater = app.updater().map_err(|e| e.to_string())?;
     let update = updater.check().await.map_err(|e| e.to_string())?;
     let Some(update) = update else {
@@ -652,6 +653,7 @@ pub async fn cmd_download_and_install_update(
     let app_h = app.clone();
     let v = version.clone();
     tauri::async_runtime::spawn(async move {
+        log::info!("Auto-update: downloading and installing v{}", v);
         let _ = app_h.emit(
             "update-download-started",
             serde_json::json!({ "version": v.clone() }),
@@ -700,7 +702,7 @@ pub async fn cmd_download_and_install_update(
 /// 下载并安装完成后,用户点"重启"按钮调用 Tauri 原生重启流程。
 #[tauri::command]
 pub fn cmd_restart_app(app: AppHandle) {
-    log::info!("User requested restart to apply update");
+    log::info!("Restart requested to apply update");
     app.restart()
 }
 
