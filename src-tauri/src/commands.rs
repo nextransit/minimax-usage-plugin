@@ -218,6 +218,7 @@ pub fn cmd_get_api_keys(state: State<'_, AppState>) -> Vec<ApiKeyView> {
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn cmd_add_api_key(
     app: AppHandle,
     state: State<'_, AppState>,
