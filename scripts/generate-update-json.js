@@ -20,39 +20,23 @@ const path = require("path");
 const PLATFORM_MAP = [
   {
     platform: "darwin-aarch64",
-    // macOS ARM64: DMG file
-    glob: /MiniMax Monitor_.*_aarch64\.dmg$/,
-    extractVersion: (fileName) => {
-      const m = fileName.match(/MiniMax Monitor_(.+)_aarch64\.dmg$/);
-      return m ? m[1] : null;
-    },
+    artifactGroup: "macos-arm64",
+    glob: /_aarch64\.app\.tar\.gz$/,
   },
   {
     platform: "darwin-x86_64",
-    // macOS x64: DMG file
-    glob: /MiniMax Monitor_.*_x64\.dmg$/,
-    extractVersion: (fileName) => {
-      const m = fileName.match(/MiniMax Monitor_(.+)_x64\.dmg$/);
-      return m ? m[1] : null;
-    },
+    artifactGroup: "macos-x64",
+    glob: /_x64\.app\.tar\.gz$/,
   },
   {
     platform: "linux-x86_64",
-    // Linux: AppImage
-    glob: /MiniMax Monitor_.*_amd64\.AppImage$/,
-    extractVersion: (fileName) => {
-      const m = fileName.match(/MiniMax Monitor_(.+)_amd64\.AppImage$/);
-      return m ? m[1] : null;
-    },
+    artifactGroup: "linux-x64",
+    glob: /MiniMax\.Monitor_.*_amd64\.AppImage$/,
   },
   {
     platform: "windows-x86_64",
-    // Windows: NSIS installer
-    glob: /MiniMax Monitor_.*_x64-setup\.exe$/,
-    extractVersion: (fileName) => {
-      const m = fileName.match(/MiniMax Monitor_(.+)_x64-setup\.exe$/);
-      return m ? m[1] : null;
-    },
+    artifactGroup: "windows-x64",
+    glob: /MiniMax\.Monitor_.*_x64-setup\.exe$/,
   },
 ];
 
@@ -77,28 +61,51 @@ function getTag() {
 function findArtifacts(artifactsDir) {
   const results = {};
 
-  function walk(dir) {
+  function walk(dir, matches, pattern) {
     if (!fs.existsSync(dir)) return;
     const entries = fs.readdirSync(dir, { withFileTypes: true });
     for (const entry of entries) {
       const fullPath = path.join(dir, entry.name);
       if (entry.isDirectory()) {
-        walk(fullPath);
-      } else if (entry.isFile()) {
-        const relativePath = fullPath.replace(artifactsDir, "");
-        for (const p of PLATFORM_MAP) {
-          if (p.glob.test(entry.name)) {
-            results[p.platform] = {
-              fileName: entry.name,
-              relativePath,
-            };
-          }
-        }
+        walk(fullPath, matches, pattern);
+      } else if (entry.isFile() && pattern.test(entry.name)) {
+        matches.push(fullPath);
       }
     }
   }
 
-  walk(artifactsDir);
+  for (const platform of PLATFORM_MAP) {
+    const matches = [];
+    walk(
+      path.join(artifactsDir, platform.artifactGroup),
+      matches,
+      platform.glob,
+    );
+
+    if (matches.length > 1) {
+      throw new Error(
+        `Multiple updater artifacts found for ${platform.platform}: ${matches.join(", ")}`,
+      );
+    }
+    if (matches.length === 0) continue;
+
+    const artifactPath = matches[0];
+    const signaturePath = `${artifactPath}.sig`;
+    if (!fs.existsSync(signaturePath)) {
+      throw new Error(`Missing updater signature for ${artifactPath}`);
+    }
+
+    const signature = fs.readFileSync(signaturePath, "utf8").trim();
+    if (!signature) {
+      throw new Error(`Updater signature is empty for ${artifactPath}`);
+    }
+
+    results[platform.platform] = {
+      fileName: path.basename(artifactPath),
+      signature,
+    };
+  }
+
   return results;
 }
 
@@ -156,23 +163,21 @@ function main() {
 
   console.log("Found artifacts:", JSON.stringify(found, null, 2));
 
+  const missingPlatforms = PLATFORM_MAP
+    .map((platform) => platform.platform)
+    .filter((platform) => !found[platform]);
+  if (missingPlatforms.length > 0) {
+    throw new Error(`Missing updater artifacts for: ${missingPlatforms.join(", ")}`);
+  }
+
   const platforms = {};
   for (const p of PLATFORM_MAP) {
     const artifact = found[p.platform];
-    if (artifact) {
-      platforms[p.platform] = {
-        url: `${baseUrl}/${artifact.fileName}`,
-        signature: "",
-      };
-      console.log(`  ${p.platform}: ${artifact.fileName}`);
-    } else {
-      console.warn(`  ${p.platform}: NOT FOUND`);
-    }
-  }
-
-  if (Object.keys(platforms).length === 0) {
-    console.error("Error: No platform artifacts found");
-    process.exit(1);
+    platforms[p.platform] = {
+      url: `${baseUrl}/${encodeURIComponent(artifact.fileName)}`,
+      signature: artifact.signature,
+    };
+    console.log(`  ${p.platform}: ${artifact.fileName}`);
   }
 
   const notes = getReleaseNotes(version);
@@ -191,4 +196,9 @@ function main() {
   console.log(JSON.stringify(updateJson, null, 2));
 }
 
-main();
+try {
+  main();
+} catch (error) {
+  console.error(`Error: ${error.message}`);
+  process.exit(1);
+}

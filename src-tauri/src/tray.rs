@@ -299,8 +299,7 @@ impl SummaryUsageData {
         } else if has_any_data && weekly_weight_total > 0.0 {
             // 没有 weekly_total 计数时,使用按 weekly_quota 加权汇总后的百分比
             summary.weekly_used_percent = Some(weekly_weighted_used_sum / weekly_weight_total);
-            summary.weekly_remaining_percent =
-                summary.weekly_used_percent.map(|p| 100.0 - p);
+            summary.weekly_remaining_percent = summary.weekly_used_percent.map(|p| 100.0 - p);
         }
 
         summary.active_keys_count = config.api_keys.iter().filter(|e| e.is_active).count();
@@ -368,10 +367,7 @@ pub fn build_tooltip(usage: &UsageData, i18n: &TrayI18n) -> String {
         parts.push(format!("Used: {:.0}%", pct));
     }
     if let Some(wk_used) = usage.weekly_used_count {
-        parts.push(format!(
-            "{}: {}",
-            i18n.weekly_remaining_prefix, wk_used
-        ));
+        parts.push(format!("{}: {}", i18n.weekly_remaining_prefix, wk_used));
     }
     if let Some(wk_pct) = usage.weekly_used_percent {
         parts.push(format!("Weekly Used: {:.0}%", wk_pct));

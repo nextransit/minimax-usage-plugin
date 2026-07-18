@@ -7,6 +7,7 @@ const vm = require("node:vm");
 const projectRoot = path.resolve(__dirname, "..");
 const appJs = fs.readFileSync(path.join(projectRoot, "src-web", "app.js"), "utf8");
 const indexHtml = fs.readFileSync(path.join(projectRoot, "src-web", "index.html"), "utf8");
+const stylesCss = fs.readFileSync(path.join(projectRoot, "src-web", "styles.css"), "utf8");
 
 test("aggregate metrics sum each visible key exactly once", () => {
   const harness = createAggregateHarness();
@@ -54,6 +55,49 @@ test("ALL view current and weekly progress widths change when aggregate usage ch
   assert.equal(harness.el("weekly-percent").textContent, "53%");
 });
 
+test("current remaining display uses weekly remaining when weekly is larger", () => {
+  const harness = createAggregateHarness();
+
+  harness.api.renderAggregateView();
+
+  assert.equal(harness.el("current-remaining").textContent, "2400");
+  assert.equal(harness.el("current-remaining").dataset.source, "weekly");
+  assert.equal(harness.el("current-remaining-wrapper").dataset.source, "weekly");
+});
+
+test("current remaining display keeps current value when it is not smaller", () => {
+  const harness = createAggregateHarness();
+  harness.context.state.usageData.keyA = makeUsage({
+    used: 20,
+    total: 2000,
+    weeklyUsed: 900,
+    weeklyTotal: 1000,
+    lastUpdated: "2026-05-16 12:01:00",
+  });
+  harness.context.state.usageData.keyB = makeUsage({
+    used: 40,
+    total: 2000,
+    weeklyUsed: 900,
+    weeklyTotal: 1000,
+    lastUpdated: "2026-05-16 12:01:30",
+  });
+
+  harness.api.renderAggregateView();
+
+  assert.equal(harness.el("current-remaining").textContent, "3940");
+  assert.equal(harness.el("current-remaining").dataset.source, "current");
+  assert.equal(harness.el("current-remaining-wrapper").dataset.source, "current");
+});
+
+test("weekly-sourced current remaining has a distinct color", () => {
+  const valueBlock = extractCssBlock(stylesCss, ".data-value.remaining-breath.weekly-source");
+  const wrapperBlock = extractCssBlock(stylesCss, ".breathing-metric.weekly-source");
+
+  assert.match(valueBlock, /color:\s*var\(--secondary\);/);
+  assert.match(wrapperBlock, /--breath-color:\s*var\(--secondary\);/);
+  assert.match(wrapperBlock, /--breath-rgb:\s*168,\s*85,\s*247;/);
+});
+
 test("percentFromUsage prefers backend percent fields and falls back to counts", () => {
   const harness = createAggregateHarness();
 
@@ -97,11 +141,11 @@ test("API key breakdown rows bind the visible bar to the same percent as the tex
 });
 
 test("breakdown progress CSS uses transform scale instead of inline width fills", () => {
-  const fillBlock = extractCssBlock(indexHtml, ".breakdown-metric-row .metric-bar-fill");
+  const fillBlock = extractCssBlock(stylesCss, ".breakdown-metric-row .metric-bar-fill");
   assert.match(fillBlock, /width:\s*100%;/);
   assert.match(fillBlock, /transform:\s*scaleX\(var\(--metric-scale,\s*0\)\);/);
   assert.doesNotMatch(fillBlock, /width:\s*0%;/);
-  assert.match(indexHtml, /\.breakdown-shimmer \.metric-bar-fill\s*\{[\s\S]*?transform:\s*scaleX\(1\);/);
+  assert.match(stylesCss, /\.breakdown-shimmer \.metric-bar-fill\s*\{[\s\S]*?transform:\s*scaleX\(1\);/);
 });
 
 test("aggregate progress render path has no temporary debug UI leftovers", () => {
@@ -219,12 +263,23 @@ function createAggregateHarness() {
     formatNumber(value) {
       return String(value);
     },
+    getWeeklyCycleTimePercent() {
+      return null;
+    },
+    getQuotaRiskCandidates() {
+      return [];
+    },
+    pickLowestRemainingRatioCandidate() {
+      return null;
+    },
     t(key) {
       return key;
     },
-    updateRemainingBreath(valueId, wrapperId, status) {
+    updateRemainingBreath(valueId, wrapperId, status, source) {
       el(valueId).dataset.status = status;
       el(wrapperId).dataset.status = status;
+      el(valueId).dataset.source = source;
+      el(wrapperId).dataset.source = source;
     },
     renderModelDetails(data) {
       context.lastModelDetails = data;
@@ -315,6 +370,9 @@ function createBreakdownHarness() {
     formatNumber(value) {
       return String(value);
     },
+    formatCountdown() {
+      return "1h";
+    },
     Date,
   };
 
@@ -332,6 +390,7 @@ function buildAggregateSource() {
     "getAggregatePercent",
     "percentFromUsage",
     "formatMetricScale",
+    "selectRemainingDisplay",
     "updateProgressBar",
     "renderAggregateView",
   ];
@@ -340,6 +399,7 @@ globalThis.__aggregateProgressTestApi = {
   getAggregateMetrics,
   getAggregatePercent,
   percentFromUsage,
+  selectRemainingDisplay,
   renderAggregateView,
   updateProgressBar,
 };`;
@@ -367,7 +427,23 @@ globalThis.__breakdownProgressTestApi = {
 function extractFunction(source, name) {
   const start = source.indexOf(`function ${name}(`);
   assert.notEqual(start, -1, `Missing function ${name}`);
-  const open = source.indexOf("{", start);
+  const paramsOpen = source.indexOf("(", start);
+  assert.notEqual(paramsOpen, -1, `Missing function params for ${name}`);
+
+  let paramsDepth = 0;
+  let paramsClose = -1;
+  for (let i = paramsOpen; i < source.length; i += 1) {
+    const char = source[i];
+    if (char === "(") paramsDepth += 1;
+    if (char === ")") paramsDepth -= 1;
+    if (paramsDepth === 0) {
+      paramsClose = i;
+      break;
+    }
+  }
+  assert.notEqual(paramsClose, -1, `Missing function params end for ${name}`);
+
+  const open = source.indexOf("{", paramsClose);
   assert.notEqual(open, -1, `Missing function body for ${name}`);
 
   let depth = 0;

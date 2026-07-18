@@ -1,6 +1,6 @@
 [package]
 name = "minimax-usage-monitor"
-version = "0.0.9"
+version = "0.0.17"
 description = "MiniMax API Usage Monitor"
 authors = ["decard"]
 edition = "2021"

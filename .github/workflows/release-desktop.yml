@@ -22,11 +22,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with: { targets: 'aarch64-apple-darwin' }
       - run: npm ci
-      - run: npm run tauri:build:ci -- --target aarch64-apple-darwin
+      - run: npm run tauri:build -- --target aarch64-apple-darwin
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
       - uses: actions/upload-artifact@v4
         with:
           name: macos-arm64
-          path: src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+          path: |
+            src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+            src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz
+            src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
           if-no-files-found: error
 
   # macOS x86_64
@@ -41,11 +47,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with: { targets: 'x86_64-apple-darwin' }
       - run: npm ci
-      - run: npm run tauri:build:ci -- --target x86_64-apple-darwin
+      - run: npm run tauri:build -- --target x86_64-apple-darwin
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
       - uses: actions/upload-artifact@v4
         with:
           name: macos-x64
-          path: src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
+          path: |
+            src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
+            src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.app.tar.gz
+            src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
           if-no-files-found: error
 
   # Linux x86_64
@@ -92,13 +104,17 @@ jobs:
           pkg-config --modversion webkit2gtk-4.1
 
       - run: npm ci
-      - run: npm run tauri:build:ci
+      - run: npm run tauri:build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
 
       - uses: actions/upload-artifact@v4
         with:
           name: linux-x64
           path: |
             src-tauri/target/release/bundle/appimage/*.AppImage
+            src-tauri/target/release/bundle/appimage/*.AppImage.sig
             src-tauri/target/release/bundle/deb/*.deb
             src-tauri/target/release/bundle/rpm/*.rpm
           if-no-files-found: error
@@ -113,11 +129,16 @@ jobs:
         with: { node-version: '22', cache: 'npm' }
       - uses: dtolnay/rust-toolchain@stable
       - run: npm ci
-      - run: npm run tauri:build:ci
+      - run: npm run tauri:build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
       - uses: actions/upload-artifact@v4
         with:
           name: windows-x64
-          path: src-tauri/target/release/bundle/nsis/*.exe
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/nsis/*.exe.sig
           if-no-files-found: error
 
   # 创建 GitHub Release 并上传所有平台的安装包
@@ -134,6 +155,33 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+
+      - name: Prepare stable release asset names
+        shell: bash
+        run: |
+          rename_macos_updater() {
+            local group="$1"
+            local suffix="$2"
+            local version="${GITHUB_REF_NAME#v}"
+            local source
+            source="$(find "artifacts/${group}" -type f -name '*.app.tar.gz' -print -quit)"
+            if [ -z "$source" ] || [ ! -f "${source}.sig" ]; then
+              echo "Missing signed macOS updater artifact for ${group}"
+              exit 1
+            fi
+
+            local target="artifacts/${group}/MiniMax.Monitor_${version}_${suffix}.app.tar.gz"
+            mv "$source" "$target"
+            mv "${source}.sig" "${target}.sig"
+          }
+
+          rename_macos_updater macos-arm64 aarch64
+          rename_macos_updater macos-x64 x64
+
+          find artifacts -type f -name '* *' -print0 | while IFS= read -r -d '' source; do
+            target="${source// /.}"
+            mv "$source" "$target"
+          done
 
       - name: Display artifacts
         run: find artifacts -type f -ls
@@ -160,7 +208,7 @@ jobs:
 
       - name: Create Release
         run: |
-          gh release delete ${{ github.ref_name }} --yes --cleanup-tag 2>/dev/null || true
+          gh release delete ${{ github.ref_name }} --yes 2>/dev/null || true
           mapfile -t artifact_files < <(find artifacts -type f)
           gh release create ${{ github.ref_name }} "${artifact_files[@]}" \
             --title "MiniMax Usage Monitor ${{ github.ref_name }}" \

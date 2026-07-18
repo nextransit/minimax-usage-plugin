@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.0.17
+
+- 当前周期剩余量小于本周累计剩余量时，展示本周累计剩余量，并使用独立紫色标注其来源。
+- 修复桌面自动更新发布链路：生成并上传签名 updater 工件，`update.json` 使用正确的平台包与签名。
+- App 启动后在前端监听器就绪时自动检查更新，发现新版本后显示更新窗口。
+- 更新安装完成后使用 Tauri 原生重启流程重新启动 App。
+
 ## 0.0.16
 
 - 桌面面板文案统一：周额度从「周剩余额度 / WEEKLY REMAINING」改为「周使用额度 / WEEKLY USAGE」，与当前周期「已使用」语义一致；进度条按已使用比例计算，状态阈值与当前周期对齐。

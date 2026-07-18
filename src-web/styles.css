@@ -249,6 +249,11 @@ body {
   --breath-rgb: 255, 46, 99;
 }
 
+.breathing-metric.weekly-source {
+  --breath-color: var(--secondary);
+  --breath-rgb: 168, 85, 247;
+}
+
 .breathing-metric::before {
   content: "";
   position: absolute;
@@ -286,6 +291,10 @@ body {
   transform: scale(1);
   transform-origin: left center;
   will-change: transform, opacity;
+}
+
+.data-value.remaining-breath.weekly-source {
+  color: var(--secondary);
 }
 
 .flip-number {

@@ -137,9 +137,9 @@ jobs:
       - name: Build Tauri app
         run: |
           if [ "${{ matrix.target }}" = "universal-apple-darwin" ]; then
-            npm run tauri:build -- --target ${{ matrix.target }}
+            npm run tauri:build -- --target ${{ matrix.target }} --config '{"bundle":{"createUpdaterArtifacts":false}}'
           else
-            npm run tauri:build:ci -- --target ${{ matrix.target }}
+            npm run tauri:build:ci -- --target ${{ matrix.target }} --config '{"bundle":{"createUpdaterArtifacts":false}}'
           fi
 
       - name: Upload artifact
@@ -218,7 +218,7 @@ jobs:
         run: npm ci
 
       - name: Build Tauri app
-        run: npm run tauri:build:ci
+        run: npm run tauri:build:ci -- --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -253,7 +253,7 @@ jobs:
         run: npm ci
 
       - name: Build Tauri app
-        run: npm run tauri:build:ci
+        run: npm run tauri:build:ci -- --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

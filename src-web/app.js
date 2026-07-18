@@ -578,6 +578,7 @@ async function init() {
     state.isLoading = false;
     render();
     closeTransientDialogs();
+    runInBackground('checkForUpdates', checkForUpdates);
     if (pendingKeyManagementOpen) {
       requestKeyManagementModal();
     }
@@ -659,17 +660,7 @@ async function setupEventListeners() {
   // ── Auto-update events ────────────────────────────────────────────────────
   // 检测到新版本时由后端 emit update-available,前端展示 changelog + [升级]/[稍后]
   await tauriListen('update-available', (event) => {
-    const payload = event.payload || {};
-    if (!payload.version) return;
-    if (state.pendingUpdate && state.pendingUpdate.version === payload.version) return;
-    state.pendingUpdate = {
-      version: String(payload.version),
-      notes: typeof payload.notes === 'string' ? payload.notes : '',
-      pub_date: payload.pub_date || null,
-    };
-    state.updateDownloading = false;
-    state.updateDownloadFinished = false;
-    showUpdateDialog();
+    applyAvailableUpdate(event.payload);
   });
 
   await tauriListen('update-download-started', () => {
@@ -698,6 +689,35 @@ async function setupEventListeners() {
     alert(t('updateDownloadFailed'));
     hideUpdateDialog();
   });
+}
+
+function applyAvailableUpdate(payload) {
+  const update = payload || {};
+  if (!update.version) return;
+  if (state.pendingUpdate && state.pendingUpdate.version === update.version) return;
+  state.pendingUpdate = {
+    version: String(update.version),
+    notes: typeof update.notes === 'string' ? update.notes : '',
+    pub_date: update.pub_date || null,
+  };
+  state.updateDownloading = false;
+  state.updateDownloadFinished = false;
+  showUpdateDialog();
+}
+
+async function checkForUpdates() {
+  try {
+    const update = await invokeWithTimeout(
+      'cmd_check_update',
+      undefined,
+      REFRESH_IPC_TIMEOUT_MS,
+    );
+    applyAvailableUpdate(update);
+  } catch (error) {
+    if (String(error) !== 'none') {
+      console.warn('Automatic update check failed:', error);
+    }
+  }
 }
 
 function showStartupError(error, options = {}) {
@@ -1322,13 +1342,19 @@ function renderAggregateView() {
   // CURRENT aggregate
   const currentPercent = m.total > 0 ? clampPercent((m.used / m.total) * 100) : (m.usedPercent ?? 0);
   const currentStatus = getStatus(currentPercent);
+  const currentRemainingDisplay = selectRemainingDisplay(m.remaining, m.weeklyRemaining);
   setText('current-used', formatNumber(m.used));
-  setFlipNumber('current-remaining-container', 'current-remaining', formatNumber(m.remaining));
+  setFlipNumber('current-remaining-container', 'current-remaining', formatNumber(currentRemainingDisplay.value));
   setText('current-total', formatNumber(m.total));
   setText('current-percent', `${Math.round(currentPercent)}%`);
   setElementClass(document.getElementById('current-percent'), `progress-percent ${currentStatus}`);
   updateProgressBar('current-card', 'current-progress', currentPercent, currentStatus);
-  updateRemainingBreath('current-remaining', 'current-remaining-wrapper', currentStatus);
+  updateRemainingBreath(
+    'current-remaining',
+    'current-remaining-wrapper',
+    currentStatus,
+    currentRemainingDisplay.source,
+  );
 
   if (m.earliestReset > 0) {
     setElementAttr(document.getElementById('window-countdown'), 'data-timestamp', m.earliestReset);
@@ -1573,14 +1599,26 @@ function renderSingleKeyView(keyId) {
 
   const currentPercent = percentFromUsage(data, 'used_count', 'total_count', 'used_percent');
   const currentStatus = data && data.ok ? getStatus(currentPercent) : 'normal';
+  const currentRemainingDisplay = data && data.ok
+    ? selectRemainingDisplay(data.remaining_count, data.weekly_remaining_count)
+    : { value: null, source: 'current' };
 
   setText('current-used', data && data.ok ? formatNumber(data.used_count) : '—');
-  setFlipNumber('current-remaining-container', 'current-remaining', data && data.ok ? formatNumber(data.remaining_count) : '—');
+  setFlipNumber(
+    'current-remaining-container',
+    'current-remaining',
+    data && data.ok ? formatNumber(currentRemainingDisplay.value) : '—',
+  );
   setText('current-total', data && data.ok ? formatNumber(data.total_count) : '—');
   setText('current-percent', data && data.ok ? `${Math.round(currentPercent)}%` : '--%');
   setElementClass(document.getElementById('current-percent'), `progress-percent ${currentStatus}`);
   updateProgressBar('current-card', 'current-progress', currentPercent, currentStatus);
-  updateRemainingBreath('current-remaining', 'current-remaining-wrapper', currentStatus);
+  updateRemainingBreath(
+    'current-remaining',
+    'current-remaining-wrapper',
+    currentStatus,
+    currentRemainingDisplay.source,
+  );
   if (data && data.reset_timestamp) {
     setElementAttr(document.getElementById('window-countdown'), 'data-timestamp', data.reset_timestamp);
   }
@@ -1927,12 +1965,13 @@ function updateProgressBar(cardId, progressId, percent, status, options = {}) {
   }
 }
 
-function updateRemainingBreath(valueId, wrapperId, status) {
+function updateRemainingBreath(valueId, wrapperId, status, source = 'current') {
   const valueEl = document.getElementById(valueId);
   const wrapper = document.getElementById(wrapperId);
+  const sourceClass = source === 'weekly' ? ' weekly-source' : '';
 
-  setElementClass(valueEl, `data-value success remaining-breath ${status}`);
-  setElementClass(wrapper, `data-item breathing-metric ${status}`);
+  setElementClass(valueEl, `data-value success remaining-breath ${status}${sourceClass}`);
+  setElementClass(wrapper, `data-item breathing-metric ${status}${sourceClass}`);
 }
 
 const flipTimers = new WeakMap();
@@ -1991,6 +2030,17 @@ function setText(id, value) {
 function formatNumber(value) {
   if (typeof value !== 'number') return '-';
   return new Intl.NumberFormat().format(value);
+}
+
+function selectRemainingDisplay(currentRemaining, weeklyRemaining) {
+  const hasCurrent = typeof currentRemaining === 'number' && Number.isFinite(currentRemaining);
+  const hasWeekly = typeof weeklyRemaining === 'number' && Number.isFinite(weeklyRemaining);
+  const useWeekly = hasCurrent && hasWeekly && currentRemaining < weeklyRemaining;
+
+  return {
+    value: useWeekly ? weeklyRemaining : currentRemaining,
+    source: useWeekly ? 'weekly' : 'current',
+  };
 }
 
 function formatRemainingQuota(entry) {
@@ -2714,4 +2764,3 @@ async function startUpdateDownload() {
     hideUpdateDialog();
   }
 }
-

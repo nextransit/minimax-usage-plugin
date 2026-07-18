@@ -597,21 +597,35 @@ pub struct UpdateAvailableInfo {
 /// 检测是否有可用更新,返回 UpdateAvailableInfo 给前端(只 check,不下载)
 #[tauri::command]
 pub async fn cmd_check_update(app: AppHandle) -> Result<UpdateAvailableInfo, String> {
+    log::info!("Update check: requesting release metadata");
     let updater = app.updater().map_err(|e| e.to_string())?;
-    let update = updater.check().await.map_err(|e| e.to_string())?;
+    let update = updater.check().await.map_err(|e| {
+        log::warn!("Update check failed: {}", e);
+        e.to_string()
+    })?;
     match update {
-        Some(update) => Ok(UpdateAvailableInfo {
-            version: update.version,
-            notes: update.body,
-            pub_date: update.date.map(|d| d.to_string()),
-        }),
-        None => Err("none".into()),
+        Some(update) => {
+            log::info!("Update check: found new version v{}", update.version);
+            crate::show_main_window(&app);
+            Ok(UpdateAvailableInfo {
+                version: update.version,
+                notes: update.body,
+                pub_date: update.date.map(|d| d.to_string()),
+            })
+        }
+        None => {
+            log::info!("Update check: already on latest version");
+            Err("none".into())
+        }
     }
 }
 
 /// 用户点击"升级"按钮:开始后台下载 + 安装;通过 progress/downloaded 事件回报状态
 #[tauri::command]
-pub async fn cmd_download_and_install_update(app: AppHandle, version: String) -> Result<(), String> {
+pub async fn cmd_download_and_install_update(
+    app: AppHandle,
+    version: String,
+) -> Result<(), String> {
     let updater = app.updater().map_err(|e| e.to_string())?;
     let update = updater.check().await.map_err(|e| e.to_string())?;
     let Some(update) = update else {
@@ -673,12 +687,11 @@ pub async fn cmd_download_and_install_update(app: AppHandle, version: String) ->
     Ok(())
 }
 
-/// 下载完成后,用户点"重启"按钮调用:退出进程,
-/// tauri-plugin-updater 会在下次启动时应用已下载的更新包(macOS/Linux)。
+/// 下载并安装完成后,用户点"重启"按钮调用 Tauri 原生重启流程。
 #[tauri::command]
 pub fn cmd_restart_app(app: AppHandle) {
     log::info!("User requested restart to apply update");
-    app.exit(0);
+    app.restart()
 }
 
 #[cfg(test)]
