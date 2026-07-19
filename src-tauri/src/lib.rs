@@ -477,6 +477,38 @@ pub fn run() {
 
             spawn_usage_refresh_loop(app_handle.clone());
 
+            // 后台自动检查更新：启动后30秒首次检查，之后每30分钟一次
+            {
+                let app_h = app_handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    // 给启动留出缓冲时间
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    loop {
+                        match crate::commands::cmd_check_update(app_h.clone()).await {
+                            Ok(info) => {
+                                log::info!("Background update check: found v{}", info.version);
+                                let _ = app_h.emit(
+                                    "update-available",
+                                    serde_json::json!({
+                                        "version": info.version,
+                                        "notes": info.notes,
+                                        "pub_date": info.pub_date,
+                                    }),
+                                );
+                            }
+                            Err(e) => {
+                                if e == "none" {
+                                    log::debug!("Background update check: already on latest");
+                                } else {
+                                    log::warn!("Background update check failed: {}", e);
+                                }
+                            }
+                        }
+                        tokio::time::sleep(std::time::Duration::from_secs(30 * 60)).await;
+                    }
+                });
+            }
+
             let initial_config = saved_config.clone();
             let initial_api_key = api_key_for_fetch.clone();
             tauri::async_runtime::spawn(async move {
