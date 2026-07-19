@@ -532,6 +532,7 @@ pub fn run() {
             cmd_show_update_window,
             cmd_download_and_install_update,
             cmd_restart_app,
+            cmd_get_app_version,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

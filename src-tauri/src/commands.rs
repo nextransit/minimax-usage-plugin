@@ -706,6 +706,12 @@ pub fn cmd_restart_app(app: AppHandle) {
     app.restart()
 }
 
+/// 返回当前应用版本号
+#[tauri::command]
+pub fn cmd_get_app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::mask_api_key;

@@ -467,6 +467,17 @@ pub fn update_tray_menu(app: &AppHandle, state: &AppState) {
     items.push(Box::new(PredefinedMenuItem::separator(app).unwrap()));
     items.push(Box::new(check_update));
 
+    // Show app version
+    let version_item = MenuItem::with_id(
+        app,
+        "version",
+        format!("v{}", env!("CARGO_PKG_VERSION")),
+        false,
+        None::<&str>,
+    )
+    .unwrap();
+    items.push(Box::new(version_item));
+
     if let Some(data) = primary_usage {
         if data.ok {
             if !data.primary_model_name.is_empty() {

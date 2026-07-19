@@ -124,6 +124,7 @@ let settingsHandlersInitialized = false;
 
 const DEFAULT_CONFIG = Object.freeze({
   config_version: 2,
+  appVersion: '--',
   refresh_interval_seconds: 20,
   show_weekly_in_status: true,
   show_percent_in_tray: true,
@@ -555,11 +556,13 @@ async function init() {
     tauriInvoke = tauri.invoke;
     tauriListen = tauri.listen;
 
-    const [config, fetchedApiKeys, allData] = await Promise.all([
+    const [config, fetchedApiKeys, allData, appVersion] = await Promise.all([
       invokeOrFallback('cmd_get_config', undefined, defaultConfig, BOOT_IPC_TIMEOUT_MS),
       invokeOrFallback('cmd_get_api_keys', undefined, [], BOOT_IPC_TIMEOUT_MS),
       invokeOrFallback('cmd_get_all_usage_data', undefined, {}, BOOT_IPC_TIMEOUT_MS),
+      invokeOrFallback('cmd_get_app_version', undefined, '--', BOOT_IPC_TIMEOUT_MS),
     ]);
+    state.appVersion = appVersion;
 
     state.config = { ...defaultConfig(), ...(config || {}) };
     state.language = state.config?.language === 'auto' ? 'zh-CN' : (state.config?.language || 'zh-CN');
@@ -579,6 +582,10 @@ async function init() {
     render();
     closeTransientDialogs();
     runInBackground('checkForUpdates', checkForUpdates);
+    // 每30分钟自动检查更新
+    setInterval(() => {
+      runInBackground('checkForUpdates', checkForUpdates);
+    }, 30 * 60 * 1000);
     if (pendingKeyManagementOpen) {
       requestKeyManagementModal();
     }
@@ -1427,6 +1434,9 @@ function renderAggregateView() {
     return acc;
   }, '');
   setText('last-updated', latest || '--');
+  // 设置版本号
+  const versionEl = document.getElementById('app-version');
+  if (versionEl) versionEl.textContent = state.appVersion || '--';
 
   // All-hidden hint
   const hint = document.getElementById('all-hidden-hint');
