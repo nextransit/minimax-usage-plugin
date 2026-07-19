@@ -2056,7 +2056,8 @@ function formatNumber(value) {
 function selectRemainingDisplay(currentRemaining, weeklyRemaining) {
   const hasCurrent = typeof currentRemaining === 'number' && Number.isFinite(currentRemaining);
   const hasWeekly = typeof weeklyRemaining === 'number' && Number.isFinite(weeklyRemaining);
-  const useWeekly = hasCurrent && hasWeekly && currentRemaining < weeklyRemaining;
+  // 如果本周累计剩余量更小，则采用本周累计剩余量（硬上限）
+  const useWeekly = hasCurrent && hasWeekly && weeklyRemaining < currentRemaining;
 
   return {
     value: useWeekly ? weeklyRemaining : currentRemaining,
