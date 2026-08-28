@@ -55,17 +55,18 @@ test("ALL view current and weekly progress widths change when aggregate usage ch
   assert.equal(harness.el("weekly-percent").textContent, "53%");
 });
 
-test("current remaining display uses weekly remaining when weekly is larger", () => {
+test("current remaining display shows the capped current remaining (no weekly mix-in)", () => {
   const harness = createAggregateHarness();
 
   harness.api.renderAggregateView();
 
-  assert.equal(harness.el("current-remaining").textContent, "2400");
-  assert.equal(harness.el("current-remaining").dataset.source, "weekly");
-  assert.equal(harness.el("current-remaining-wrapper").dataset.source, "weekly");
+  // keyA: min(80, 1800) = 80; keyB: min(160, 600) = 160 => 240
+  assert.equal(harness.el("current-remaining").textContent, "240");
+  assert.equal(harness.el("current-remaining").dataset.source, "current");
+  assert.equal(harness.el("current-remaining-wrapper").dataset.source, "current");
 });
 
-test("current remaining display keeps current value when it is not smaller", () => {
+test("current remaining respects per-key hard cap (current <= weekly remaining)", () => {
   const harness = createAggregateHarness();
   harness.context.state.usageData.keyA = makeUsage({
     used: 20,
@@ -84,7 +85,8 @@ test("current remaining display keeps current value when it is not smaller", () 
 
   harness.api.renderAggregateView();
 
-  assert.equal(harness.el("current-remaining").textContent, "3940");
+  // keyA: min(1980, 100) = 100; keyB: min(1960, 100) = 100 => 200
+  assert.equal(harness.el("current-remaining").textContent, "200");
   assert.equal(harness.el("current-remaining").dataset.source, "current");
   assert.equal(harness.el("current-remaining-wrapper").dataset.source, "current");
 });
