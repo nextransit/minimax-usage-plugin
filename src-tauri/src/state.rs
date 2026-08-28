@@ -54,9 +54,13 @@ pub struct UsageData {
     pub used_count: Option<i64>,
     pub used_percent: Option<f64>,
     pub remaining_percent: Option<f64>,
+    #[serde(default)]
+    pub current_from_config: bool,
     pub weekly_total_count: Option<i64>,
     pub weekly_used_count: Option<i64>,
     pub weekly_remaining_count: Option<i64>,
+    #[serde(default)]
+    pub weekly_from_config: bool,
     pub weekly_used_percent: Option<f64>,
     pub weekly_remaining_percent: Option<f64>,
     pub weekly_reset_timestamp: Option<i64>,

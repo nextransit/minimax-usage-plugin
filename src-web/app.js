@@ -1360,9 +1360,9 @@ function renderAggregateView() {
   // CURRENT aggregate
   const currentPercent = m.total > 0 ? clampPercent((m.used / m.total) * 100) : (m.usedPercent ?? 0);
   const currentStatus = getStatus(currentPercent);
-  const currentRemainingDisplay = selectRemainingDisplay(m.remaining, m.weeklyRemaining);
+  const currentRemainingValue = m.remaining;
   setText('current-used', formatNumber(m.used));
-  setFlipNumber('current-remaining-container', 'current-remaining', formatNumber(currentRemainingDisplay.value));
+  setFlipNumber('current-remaining-container', 'current-remaining', formatNumber(currentRemainingValue));
   setText('current-total', formatNumber(m.total));
   setText('current-percent', `${Math.round(currentPercent)}%`);
   setElementClass(document.getElementById('current-percent'), `progress-percent ${currentStatus}`);
@@ -1371,7 +1371,7 @@ function renderAggregateView() {
     'current-remaining',
     'current-remaining-wrapper',
     currentStatus,
-    currentRemainingDisplay.source,
+    'current',
   );
 
   if (m.earliestReset > 0) {
@@ -2095,23 +2095,38 @@ function getAggregateMetrics() {
     const data = state.usageData[key.id];
     if (!data || !data.ok) return;
     totals.hasData = true;
-    totals.used += data.used_count || 0;
-    totals.remaining += data.remaining_count || 0;
-    totals.total += data.total_count || 0;
-    totals.weeklyUsed += data.weekly_used_count || 0;
-    totals.weeklyRemaining += data.weekly_remaining_count || 0;
-    totals.weeklyTotal += data.weekly_total_count || 0;
-    if (typeof data.used_percent === 'number' && Number.isFinite(data.used_percent)) {
-      const pct = clampPercent(data.used_percent);
-      totals.usedPercent = totals.usedPercent === null
-        ? pct
-        : Math.max(totals.usedPercent, pct);
+
+    // 当前周期：由配置反推、无真实 API 计数的 key 不应污染汇总
+    // （否则会把配置配额凭空计入 used/total/remaining）
+    const currentFromConfig = !!data.current_from_config;
+    if (!currentFromConfig) {
+      const curRem = data.remaining_count || 0;
+      const curWeeklyRem = data.weekly_remaining_count || 0;
+      // 与单 key 视图一致的硬上限封顶：当前剩余不超过本周累计剩余
+      const effectiveCurRem = Math.min(curRem, curWeeklyRem);
+      totals.used += data.used_count || 0;
+      totals.remaining += effectiveCurRem;
+      totals.total += data.total_count || 0;
+      if (typeof data.used_percent === 'number' && Number.isFinite(data.used_percent)) {
+        const pct = clampPercent(data.used_percent);
+        totals.usedPercent = totals.usedPercent === null
+          ? pct
+          : Math.max(totals.usedPercent, pct);
+      }
     }
-    if (typeof data.weekly_used_percent === 'number' && Number.isFinite(data.weekly_used_percent)) {
-      const pct = clampPercent(data.weekly_used_percent);
-      totals.weeklyUsedPercent = totals.weeklyUsedPercent === null
-        ? pct
-        : Math.max(totals.weeklyUsedPercent, pct);
+
+    // 本周累计：配置反推的也跳过
+    const weeklyFromConfig = !!data.weekly_from_config;
+    if (!weeklyFromConfig) {
+      totals.weeklyUsed += data.weekly_used_count || 0;
+      totals.weeklyRemaining += data.weekly_remaining_count || 0;
+      totals.weeklyTotal += data.weekly_total_count || 0;
+      if (typeof data.weekly_used_percent === 'number' && Number.isFinite(data.weekly_used_percent)) {
+        const pct = clampPercent(data.weekly_used_percent);
+        totals.weeklyUsedPercent = totals.weeklyUsedPercent === null
+          ? pct
+          : Math.max(totals.weeklyUsedPercent, pct);
+      }
     }
     if (data.reset_timestamp && (totals.earliestReset === 0 || data.reset_timestamp < totals.earliestReset)) {
       totals.earliestReset = data.reset_timestamp;

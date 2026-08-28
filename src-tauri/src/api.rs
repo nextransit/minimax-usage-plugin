@@ -139,9 +139,11 @@ fn build_usage_data_from_payload(
             used_count: None,
             used_percent: None,
             remaining_percent: None,
+            current_from_config: false,
             weekly_total_count: None,
             weekly_used_count: None,
             weekly_remaining_count: None,
+            weekly_from_config: false,
             weekly_used_percent: None,
             weekly_remaining_percent: None,
             weekly_reset_timestamp: None,
@@ -279,9 +281,11 @@ fn build_usage_data_from_payload(
         used_count,
         used_percent,
         remaining_percent,
+        current_from_config: false,
         weekly_total_count: weekly_total.filter(|&v| v > 0),
         weekly_used_count: weekly_used,
         weekly_remaining_count: weekly_remaining,
+        weekly_from_config: false,
         weekly_used_percent: weekly_percent.filter(|&v| v.is_finite()),
         weekly_remaining_percent,
         weekly_reset_timestamp,
@@ -309,6 +313,16 @@ pub fn apply_configured_quota_counts(
             data.remaining_count = Some(remaining);
             data.used_count = Some(used);
             data.used_percent = Some(clamp_percent(100.0 - remaining_percent));
+            data.current_from_config = true;
+            log::info!(
+                "[quota] 当前周期由配置反推 (无真实 API 计数): key={} current_quota={} remaining_percent={:.1} => total={} remaining={} used={}",
+                data.primary_model_name,
+                current_quota_count,
+                remaining_percent,
+                total,
+                remaining,
+                used,
+            );
         }
     }
 
@@ -320,6 +334,16 @@ pub fn apply_configured_quota_counts(
             data.weekly_remaining_count = Some(remaining);
             data.weekly_used_count = Some(used);
             data.weekly_used_percent = Some(clamp_percent(100.0 - remaining_percent));
+            data.weekly_from_config = true;
+            log::info!(
+                "[quota] 本周累计由配置反推 (无真实 API 计数): key={} weekly_quota={} remaining_percent={:.1} => total={} remaining={} used={}",
+                data.primary_model_name,
+                weekly_quota_count,
+                remaining_percent,
+                total,
+                remaining,
+                used,
+            );
         }
     }
 }

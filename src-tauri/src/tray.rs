@@ -230,25 +230,29 @@ impl SummaryUsageData {
                 summary.loaded_keys_count += 1;
                 if data.ok {
                     has_any_data = true;
-                    // 累计月度数据
-                    if let Some(cnt) = data.total_count {
-                        total_count += cnt;
+                    // 累计月度数据（配置反推的当前周期数据不计入真实汇总）
+                    if !data.current_from_config {
+                        if let Some(cnt) = data.total_count {
+                            total_count += cnt;
+                        }
+                        if let Some(cnt) = data.remaining_count {
+                            remaining_count += cnt;
+                        }
+                        if let Some(cnt) = data.used_count {
+                            used_count += cnt;
+                        }
                     }
-                    if let Some(cnt) = data.remaining_count {
-                        remaining_count += cnt;
-                    }
-                    if let Some(cnt) = data.used_count {
-                        used_count += cnt;
-                    }
-                    // 累计周度数据
-                    if let Some(cnt) = data.weekly_total_count {
-                        weekly_total_count += cnt;
-                    }
-                    if let Some(cnt) = data.weekly_remaining_count {
-                        weekly_remaining_count += cnt;
-                    }
-                    if let Some(cnt) = data.weekly_used_count {
-                        weekly_used_count += cnt;
+                    // 累计周度数据（配置反推的本周累计数据不计入真实汇总）
+                    if !data.weekly_from_config {
+                        if let Some(cnt) = data.weekly_total_count {
+                            weekly_total_count += cnt;
+                        }
+                        if let Some(cnt) = data.weekly_remaining_count {
+                            weekly_remaining_count += cnt;
+                        }
+                        if let Some(cnt) = data.weekly_used_count {
+                            weekly_used_count += cnt;
+                        }
                     }
                     // weekly 比例:按每个 key 的 weekly_quota_count 加权汇总
                     let weekly_pct = data
@@ -864,9 +868,11 @@ mod tests {
             used_count: Some(0),
             used_percent: Some(0.0),
             remaining_percent: Some(100.0),
+            current_from_config: false,
             weekly_total_count: Some(21),
             weekly_used_count: Some(0),
             weekly_remaining_count: Some(21),
+            weekly_from_config: false,
             weekly_used_percent: weekly_remaining_percent.map(|pct| 100.0 - pct),
             weekly_remaining_percent,
             weekly_reset_timestamp: None,
