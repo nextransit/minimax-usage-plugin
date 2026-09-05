@@ -44,7 +44,7 @@
 ### 关键陷阱（易踩坑）
 1. **当前周期 vs 本周累计是两套独立计数**，不要交叉。汇总（web `getAggregateMetrics` 与 Rust `SummaryUsageData::from_usage_map`）只累加，不要像旧代码那样用 `selectRemainingDisplay` 把"周剩余"混入"当前卡片"显示（这是已修 bug，见提交 `fa695a1`）。
 2. **配置反推不是"无数据"**：当 MiniMax API 未返回当前/本周计数但带 `remaining_percent` 时，`api.rs::apply_configured_quota_counts` 会用 `current_quota_count`/`weekly_quota_count` 配置反推 total/remaining/used，并置 `UsageData.current_from_config`/`weekly_from_config = true`，同时打印 `[quota]` 日志。**反推值是基于真实百分比的最佳近似，仍应计入汇总**；切勿在聚合时 blanket 跳过 `from_config` 为真的 key —— 真实环境里所有数据往往都是反推的，那样会得到全 0/0/0 的回归（已踩过）。这两个 flag 仅用于日志诊断。若要排除某个 key，需有确切证据（见日志）且只针对明确的脏数据。
-3. **每 key 当前剩余硬上限**：单 key 视图 `selectRemainingDisplay` 约定"当前剩余不超过周剩余"。在 web 汇总中改为对每 key 取 `min(当前剩余, 周剩余)`，仅作用于当前周期剩余量，不要再切换成显示周剩余（这解决了"单 key 显示 0、汇总却显示 1200"的类问题）。
+3. **每 key 当前有效总配额 = 已使用 + 实际可用剩余**：汇总（web `getAggregateMetrics` 与 Rust `from_usage_map`）先对每 key 计算当前剩余与周剩余的交集：`min(max(0, 当前剩余), max(0, 周剩余))`；再将当前卡片的总配额计算为 `当前已使用 + 交集剩余`，确保“已使用/剩余/总配额”三元组守恒。静态配置配额仅用于API字段缺失时的回退，不直接作为当前卡片总配额。周卡片仍独立累加，不受当前有效配额重算影响；超额使用保留真实已用量，百分比钳位到 [0,100]。例：当前已用810、交集剩余1770时，当前有效总配额应为2580，而不是静态配置总量6000。
 4. 修改 `UsageData` 结构体（state.rs）新增字段时，所有 `UsageData { ... }` 字面量（含 `api.rs` 错误分支、`tray.rs` 测试 `make_usage` 等）都必须补字段；新增字段加 `#[serde(default)]` 以免旧缓存反序列化失败。
 
 ## 构建后清理

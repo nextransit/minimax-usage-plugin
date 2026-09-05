@@ -1464,7 +1464,10 @@ function renderBreakdownList() {
 function renderKeyDetailCard(key) {
   const color = safeKeyColor(key.color);
   const data = state.usageData[key.id];
-  const currentPct = percentFromUsage(data, 'used_count', 'total_count', 'used_percent');
+  const currentMetrics = getEffectiveCurrentMetrics(data, key);
+  const currentPct = currentMetrics.total > 0
+    ? clampPercent((currentMetrics.used / currentMetrics.total) * 100)
+    : 0;
   const weeklyPct = percentFromUsage(data, 'weekly_used_count', 'weekly_total_count', 'weekly_used_percent');
   const isHidden = key.is_active === false;
   const isLoading = state.pendingRefreshKeyIds.has(key.id);
@@ -1569,7 +1572,7 @@ function renderKeyDetailCard(key) {
           <span class="breakdown-actions">${actions}</span>
         </div>
         ${errorBlock}
-        ${metricRow(t('currentInterval'), currentPct, currentStatus, data?.used_count, data?.total_count, data?.reset_timestamp, 'current')}
+        ${metricRow(t('currentInterval'), currentPct, currentStatus, currentMetrics.used, currentMetrics.total, data?.reset_timestamp, 'current')}
         ${metricRow(t('weeklyQuota'), weeklyPct, weeklyStatus, data?.weekly_used_count, data?.weekly_total_count, data?.weekly_reset_timestamp, 'weekly')}
         ${expandBlock}
       </div>
@@ -1618,19 +1621,22 @@ function renderSingleKeyView(keyId) {
   setText('primary-model', data && data.ok ? (data.primary_model_name || t('unknown')) : t('unknown'));
   setText('interval-label', data && data.ok ? (data.interval_label || t('na')) : (inlineError ? t('syncFailed') : t('waitingData')));
 
-  const currentPercent = percentFromUsage(data, 'used_count', 'total_count', 'used_percent');
+  const currentMetrics = getEffectiveCurrentMetrics(data, key);
+  const currentPercent = currentMetrics.total > 0
+    ? clampPercent((currentMetrics.used / currentMetrics.total) * 100)
+    : 0;
   const currentStatus = data && data.ok ? getStatus(currentPercent) : 'normal';
   const currentRemainingDisplay = data && data.ok
-    ? selectRemainingDisplay(data.remaining_count, data.weekly_remaining_count)
+    ? { value: currentMetrics.remaining, source: currentMetrics.remainingSource }
     : { value: null, source: 'current' };
 
-  setText('current-used', data && data.ok ? formatNumber(data.used_count) : '—');
+  setText('current-used', data && data.ok ? formatNumber(currentMetrics.used) : '—');
   setFlipNumber(
     'current-remaining-container',
     'current-remaining',
     data && data.ok ? formatNumber(currentRemainingDisplay.value) : '—',
   );
-  setText('current-total', data && data.ok ? formatNumber(data.total_count) : '—');
+  setText('current-total', data && data.ok ? formatNumber(currentMetrics.total) : '—');
   setText('current-percent', data && data.ok ? `${Math.round(currentPercent)}%` : '--%');
   setElementClass(document.getElementById('current-percent'), `progress-percent ${currentStatus}`);
   updateProgressBar('current-card', 'current-progress', currentPercent, currentStatus);
@@ -2053,16 +2059,73 @@ function formatNumber(value) {
   return new Intl.NumberFormat().format(value);
 }
 
-function selectRemainingDisplay(currentRemaining, weeklyRemaining) {
-  const hasCurrent = typeof currentRemaining === 'number' && Number.isFinite(currentRemaining);
-  const hasWeekly = typeof weeklyRemaining === 'number' && Number.isFinite(weeklyRemaining);
-  // 如果本周累计剩余量更小，则采用本周累计剩余量（硬上限）
-  const useWeekly = hasCurrent && hasWeekly && weeklyRemaining < currentRemaining;
+function normalizeCount(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, value) : null;
+}
 
+function resolveQuotaCount(value, fallback) {
+  const quota = normalizeCount(value);
+  if (quota !== null && quota > 0) return quota;
+  const configured = normalizeCount(fallback);
+  return configured !== null && configured > 0 ? configured : null;
+}
+
+function resolveUsedCount(used, total, remaining) {
+  const reported = normalizeCount(used);
+  if (reported !== null) return reported;
+  const resolvedTotal = normalizeCount(total);
+  const resolvedRemaining = normalizeCount(remaining);
+  return resolvedTotal !== null && resolvedRemaining !== null
+    ? Math.max(0, resolvedTotal - resolvedRemaining)
+    : 0;
+}
+
+function resolveRemainingCount(remaining, total, used) {
+  const reported = normalizeCount(remaining);
+  if (reported !== null) return reported;
+  const resolvedTotal = normalizeCount(total);
+  const resolvedUsed = normalizeCount(used);
+  return resolvedTotal !== null && resolvedUsed !== null
+    ? Math.max(0, resolvedTotal - resolvedUsed)
+    : null;
+}
+
+function selectRemainingDisplay(currentRemaining, weeklyRemaining) {
+  const current = normalizeCount(currentRemaining);
+  const weekly = normalizeCount(weeklyRemaining);
+  if (current !== null && weekly !== null) {
+    return { value: Math.min(current, weekly), source: weekly < current ? 'weekly' : 'current' };
+  }
+  if (current !== null) return { value: current, source: 'current' };
+  return { value: null, source: 'current' };
+}
+
+function getEffectiveCurrentMetrics(data, key = null) {
+  if (!data || !data.ok) {
+    return { used: 0, remaining: null, total: 0, remainingSource: 'current' };
+  }
+  const currentTotal = resolveQuotaCount(data.total_count, key?.current_quota_count);
+  const currentUsed = resolveUsedCount(data.used_count, currentTotal, data.remaining_count);
+  const current = resolveRemainingCount(data.remaining_count, currentTotal, currentUsed);
+  const weeklyTotal = resolveQuotaCount(data.weekly_total_count, key?.weekly_quota_count);
+  const weeklyUsed = resolveUsedCount(data.weekly_used_count, weeklyTotal, data.weekly_remaining_count);
+  const weekly = resolveRemainingCount(
+    data.weekly_remaining_count,
+    weeklyTotal,
+    weeklyUsed,
+  );
+  const display = selectRemainingDisplay(current, weekly);
   return {
-    value: useWeekly ? weeklyRemaining : currentRemaining,
-    source: useWeekly ? 'weekly' : 'current',
+    used: currentUsed,
+    remaining: display.value,
+    total: display.value === null ? (currentTotal ?? 0) : currentUsed + display.value,
+    remainingSource: display.source,
   };
+}
+
+function getEffectiveCurrentRemaining(data, key = null) {
+  const metrics = getEffectiveCurrentMetrics(data, key);
+  return { value: metrics.remaining, source: metrics.remainingSource };
 }
 
 function formatRemainingQuota(entry) {
@@ -2096,31 +2159,34 @@ function getAggregateMetrics() {
     if (!data || !data.ok) return;
     totals.hasData = true;
 
-    // 当前周期：当前剩余按"硬上限"封顶，与单 key 视图一致
-    // （当前周期剩余不应超过本周累计剩余，否则会显示虚高的剩余量）
-    const curRem = data.remaining_count || 0;
-    const curWeeklyRem = data.weekly_remaining_count || 0;
-    const effectiveCurRem = Math.min(curRem, curWeeklyRem);
-    totals.used += data.used_count || 0;
-    totals.remaining += effectiveCurRem;
-    totals.total += data.total_count || 0;
-    if (typeof data.used_percent === 'number' && Number.isFinite(data.used_percent)) {
-      const pct = clampPercent(data.used_percent);
-      totals.usedPercent = totals.usedPercent === null
-        ? pct
-        : Math.max(totals.usedPercent, pct);
-    }
+    // 总配额是静态配额；实际可用量才受当前周期和周剩余量共同约束。
+    const currentTotal = resolveQuotaCount(data.total_count, key.current_quota_count);
+    const currentUsed = resolveUsedCount(data.used_count, currentTotal, data.remaining_count);
+    const currentRawRemaining = resolveRemainingCount(
+      data.remaining_count,
+      currentTotal,
+      currentUsed,
+    );
+    const weeklyTotal = resolveQuotaCount(data.weekly_total_count, key.weekly_quota_count);
+    const weeklyUsed = resolveUsedCount(data.weekly_used_count, weeklyTotal, data.weekly_remaining_count);
+    const weeklyRawRemaining = resolveRemainingCount(
+      data.weekly_remaining_count,
+      weeklyTotal,
+      weeklyUsed,
+    );
+    const currentDisplay = selectRemainingDisplay(currentRawRemaining, weeklyRawRemaining);
+    const currentRemaining = currentDisplay.value;
+    const effectiveCurrentTotal = currentRemaining === null
+      ? (currentTotal ?? 0)
+      : currentUsed + currentRemaining;
 
-    // 本周累计
-    totals.weeklyUsed += data.weekly_used_count || 0;
-    totals.weeklyRemaining += data.weekly_remaining_count || 0;
-    totals.weeklyTotal += data.weekly_total_count || 0;
-    if (typeof data.weekly_used_percent === 'number' && Number.isFinite(data.weekly_used_percent)) {
-      const pct = clampPercent(data.weekly_used_percent);
-      totals.weeklyUsedPercent = totals.weeklyUsedPercent === null
-        ? pct
-        : Math.max(totals.weeklyUsedPercent, pct);
-    }
+    totals.used += currentUsed;
+    totals.remaining += currentRemaining ?? 0;
+    totals.total += effectiveCurrentTotal;
+    totals.weeklyUsed += weeklyUsed;
+    totals.weeklyRemaining += weeklyRawRemaining ?? 0;
+    totals.weeklyTotal += weeklyTotal ?? 0;
+
     if (data.reset_timestamp && (totals.earliestReset === 0 || data.reset_timestamp < totals.earliestReset)) {
       totals.earliestReset = data.reset_timestamp;
     }
@@ -2132,6 +2198,12 @@ function getAggregateMetrics() {
       totals.intervalLabel = data.interval_label || '';
     }
   });
+  if (totals.total > 0) {
+    totals.usedPercent = clampPercent((totals.used / totals.total) * 100);
+  }
+  if (totals.weeklyTotal > 0) {
+    totals.weeklyUsedPercent = clampPercent((totals.weeklyUsed / totals.weeklyTotal) * 100);
+  }
   return totals;
 }
 

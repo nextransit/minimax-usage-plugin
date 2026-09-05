@@ -205,12 +205,53 @@ pub struct SummaryUsageData {
     pub has_error: bool,
 }
 
+fn non_negative(value: Option<i64>) -> Option<i64> {
+    value.map(|value| value.max(0))
+}
+
+fn resolve_quota_count(value: Option<i64>, fallback: i64) -> Option<i64> {
+    non_negative(value)
+        .filter(|value| *value > 0)
+        .or_else(|| (fallback > 0).then_some(fallback))
+}
+
+fn resolve_used_count(used: Option<i64>, total: Option<i64>, remaining: Option<i64>) -> i64 {
+    non_negative(used).unwrap_or_else(|| {
+        total
+            .zip(non_negative(remaining))
+            .map(|(total, remaining)| total.saturating_sub(remaining).max(0))
+            .unwrap_or(0)
+    })
+}
+
+fn resolve_remaining_count(remaining: Option<i64>, total: Option<i64>, used: i64) -> Option<i64> {
+    non_negative(remaining).or_else(|| total.map(|total| total.saturating_sub(used).max(0)))
+}
+
+fn clamp_percent(percent: f64) -> f64 {
+    if percent.is_finite() {
+        percent.clamp(0.0, 100.0)
+    } else {
+        0.0
+    }
+}
+
+fn effective_remaining(current: Option<i64>, weekly: Option<i64>) -> Option<i64> {
+    match (current, weekly) {
+        (Some(current), Some(weekly)) => Some(current.min(weekly)),
+        (Some(current), None) => Some(current),
+        // 缺少当前周期数据时，不能仅凭周剩余量宣称当前可用。
+        (None, Some(_weekly)) => None,
+        (None, None) => None,
+    }
+}
+
 impl SummaryUsageData {
     /// 计算所有 API Key 的汇总使用数据
     ///
     /// "当前周期使用比例" = sum(各 key 已用) / sum(各 key 总额) × 100%
-    /// "本周累计使用比例" = sum(各 key weekly_used × weekly_quota) / sum(各 key weekly_quota) × 100%
-    ///                   若 weekly_quota 缺失则退化为简单加权平均
+    /// "本周累计使用比例" = sum(各 key weekly_used) / sum(各 key weekly_total) × 100%
+    ///                   缺少 API 总量时回退到每个 key 的配置配额。
     pub fn from_usage_map(config: &AppConfig, usage: &HashMap<String, UsageData>) -> Self {
         let mut summary = SummaryUsageData::default();
         let mut total_count = 0i64;
@@ -219,91 +260,80 @@ impl SummaryUsageData {
         let mut weekly_total_count = 0i64;
         let mut weekly_remaining_count = 0i64;
         let mut weekly_used_count = 0i64;
-        // weekly 加权汇总权重(各 key 的 weekly_quota_count)
-        let mut weekly_weighted_used_sum = 0f64;
-        let mut weekly_weight_total = 0f64;
         let mut has_any_data = false;
 
-        // 遍历所有配置的 API Key
         for entry in &config.api_keys {
-            if let Some(data) = usage.get(&entry.id) {
-                summary.loaded_keys_count += 1;
-                if data.ok {
-                    has_any_data = true;
-                    // 累计月度数据
-                    if let Some(cnt) = data.total_count {
-                        total_count += cnt;
-                    }
-                    if let Some(cnt) = data.remaining_count {
-                        remaining_count += cnt;
-                    }
-                    if let Some(cnt) = data.used_count {
-                        used_count += cnt;
-                    }
-                    // 累计周度数据
-                    if let Some(cnt) = data.weekly_total_count {
-                        weekly_total_count += cnt;
-                    }
-                    if let Some(cnt) = data.weekly_remaining_count {
-                        weekly_remaining_count += cnt;
-                    }
-                    if let Some(cnt) = data.weekly_used_count {
-                        weekly_used_count += cnt;
-                    }
-                    // weekly 比例:按每个 key 的 weekly_quota_count 加权汇总
-                    let weekly_pct = data
-                        .weekly_used_percent
-                        .or_else(|| data.weekly_remaining_percent.map(|p| 100.0 - p));
-                    if let Some(pct) = weekly_pct {
-                        let weight = if entry.weekly_quota_count > 0 {
-                            entry.weekly_quota_count as f64
-                        } else {
-                            1.0
-                        };
-                        weekly_weighted_used_sum += pct * weight;
-                        weekly_weight_total += weight;
-                    }
-                } else {
-                    summary.has_error = true;
-                }
+            let Some(data) = usage.get(&entry.id) else {
+                continue;
+            };
+            summary.loaded_keys_count += 1;
+            if !data.ok {
+                summary.has_error = true;
+                continue;
             }
+            has_any_data = true;
+
+            let current_total = resolve_quota_count(data.total_count, entry.current_quota_count);
+            let current_used =
+                resolve_used_count(data.used_count, current_total, data.remaining_count);
+            let current_remaining = effective_remaining(
+                resolve_remaining_count(data.remaining_count, current_total, current_used),
+                resolve_remaining_count(
+                    data.weekly_remaining_count,
+                    resolve_quota_count(data.weekly_total_count, entry.weekly_quota_count),
+                    resolve_used_count(
+                        data.weekly_used_count,
+                        resolve_quota_count(data.weekly_total_count, entry.weekly_quota_count),
+                        data.weekly_remaining_count,
+                    ),
+                ),
+            );
+            let effective_current_total = current_remaining
+                .map(|remaining| current_used.saturating_add(remaining))
+                .or(current_total)
+                .unwrap_or(0);
+            total_count = total_count.saturating_add(effective_current_total);
+            used_count = used_count.saturating_add(current_used);
+            remaining_count = remaining_count.saturating_add(current_remaining.unwrap_or(0));
+
+            let weekly_total =
+                resolve_quota_count(data.weekly_total_count, entry.weekly_quota_count);
+            let weekly_used = resolve_used_count(
+                data.weekly_used_count,
+                weekly_total,
+                data.weekly_remaining_count,
+            );
+            let weekly_remaining =
+                resolve_remaining_count(data.weekly_remaining_count, weekly_total, weekly_used);
+            weekly_total_count = weekly_total_count.saturating_add(weekly_total.unwrap_or(0));
+            weekly_used_count = weekly_used_count.saturating_add(weekly_used);
+            weekly_remaining_count =
+                weekly_remaining_count.saturating_add(weekly_remaining.unwrap_or(0));
         }
 
-        // 计算百分比
-        if total_count > 0 {
+        if has_any_data {
             summary.total_count = Some(total_count);
             summary.remaining_count = Some(remaining_count);
             summary.used_count = Some(used_count);
-            // 加权汇总:sum(used) / sum(total)
-            summary.used_percent = Some((used_count as f64 / total_count as f64) * 100.0);
-        } else if has_any_data {
-            // 数据没有 total/used 计数,但每个 key 仍可能报 used_percent;
-            // 同样按 weekly_quota 加权汇总
-            summary.used_percent = if weekly_weight_total > 0.0 {
-                Some(weekly_weighted_used_sum / weekly_weight_total)
-            } else {
-                None
-            };
-        }
-
-        if weekly_total_count > 0 {
+            if total_count > 0 {
+                summary.used_percent = Some(clamp_percent(
+                    (used_count as f64 / total_count as f64) * 100.0,
+                ));
+            }
             summary.weekly_total_count = Some(weekly_total_count);
             summary.weekly_remaining_count = Some(weekly_remaining_count);
             summary.weekly_used_count = Some(weekly_used_count);
-            summary.weekly_used_percent = if weekly_weight_total > 0.0 {
-                Some(weekly_weighted_used_sum / weekly_weight_total)
-            } else {
-                Some((weekly_used_count as f64 / weekly_total_count as f64) * 100.0)
-            };
-            summary.weekly_remaining_percent = summary.weekly_used_percent.map(|p| 100.0 - p);
-        } else if has_any_data && weekly_weight_total > 0.0 {
-            // 没有 weekly_total 计数时,使用按 weekly_quota 加权汇总后的百分比
-            summary.weekly_used_percent = Some(weekly_weighted_used_sum / weekly_weight_total);
-            summary.weekly_remaining_percent = summary.weekly_used_percent.map(|p| 100.0 - p);
+            if weekly_total_count > 0 {
+                summary.weekly_used_percent = Some(clamp_percent(
+                    (weekly_used_count as f64 / weekly_total_count as f64) * 100.0,
+                ));
+                summary.weekly_remaining_percent = Some(clamp_percent(
+                    (weekly_remaining_count as f64 / weekly_total_count as f64) * 100.0,
+                ));
+            }
         }
 
         summary.active_keys_count = config.api_keys.iter().filter(|e| e.is_active).count();
-
         summary
     }
 }
@@ -880,17 +910,18 @@ mod tests {
     }
 
     #[test]
-    fn tray_summary_uses_reported_weekly_remaining_percent() {
+    fn tray_summary_uses_weekly_counts_over_stale_percent_fields() {
         let config = make_config();
         let mut usage = HashMap::new();
         usage.insert("key-1".to_string(), make_usage(Some(89.0)));
 
         let summary = SummaryUsageData::from_usage_map(&config, &usage);
 
-        assert_eq!(summary.weekly_remaining_percent, Some(89.0));
+        // 计数是权威输入，旧的百分比字段不能覆盖 0/21 的实际结果。
+        assert_eq!(summary.weekly_remaining_percent, Some(100.0));
         assert_eq!(
             format_summary_tray_usage(&summary).as_deref(),
-            Some("0%/11%")
+            Some("0%/0%")
         );
     }
 
@@ -965,33 +996,113 @@ mod tests {
     fn tray_summary_aggregates_multiple_keys_as_weighted_average() {
         let config = make_multi_key_config();
         let mut usage = HashMap::new();
-        // key-a: 周剩余 100% (即 used 0%)
-        usage.insert(
-            "key-a".to_string(),
-            make_usage_with_counts(100, 0, Some(100.0)),
-        );
-        // key-b: 周剩余 30% (即 used 70%)
-        usage.insert(
-            "key-b".to_string(),
-            make_usage_with_counts(100, 70, Some(30.0)),
-        );
+        // key-a: 周窗口 used=0, remaining=21
+        let mut ua = make_usage_with_counts(100, 0, Some(100.0));
+        ua.weekly_used_count = Some(0);
+        ua.weekly_total_count = Some(200);
+        ua.weekly_remaining_count = Some(200);
+        usage.insert("key-a".to_string(), ua);
+        // key-b: 周窗口 used=70, remaining=130
+        let mut ub = make_usage_with_counts(100, 70, Some(30.0));
+        ub.weekly_used_count = Some(70);
+        ub.weekly_total_count = Some(200);
+        ub.weekly_remaining_count = Some(130);
+        usage.insert("key-b".to_string(), ub);
 
         let summary = SummaryUsageData::from_usage_map(&config, &usage);
 
         // 当前周期 used 比例: sum(used)/sum(total) = (0+70)/(100+100) = 35%
         assert_eq!(summary.used_percent, Some(35.0));
-        // 本周 used 比例: 因为没有 weekly_total_count(API 不返回),
-        // 取 weekly_used_percent 的加权 (sum(used*total)/sum(total)) 不可行,
-        // 转为 sum(weekly_used_percent * config_weekly_quota) / sum(config_weekly_quota)
-        // 即 (0%*15000 + 70%*15000)/(15000+15000) = 35%
+        // 本周 used 比例 = (0+70)/(200+200) = 17.5%
         assert_eq!(
             summary.weekly_used_percent,
-            Some(35.0),
-            "weekly_used_percent must be weighted sum across all keys, not max"
+            Some(17.5),
+            "weekly_used_percent must be based on aggregated counts"
         );
         assert_eq!(
             format_summary_tray_usage(&summary).as_deref(),
-            Some("35%/35%")
+            Some("35%/18%")
+        );
+    }
+
+    #[test]
+    fn tray_summary_aggregates_different_key_quotas_and_weekly_shortfall() {
+        let mut config = make_multi_key_config();
+        config.api_keys[0].current_quota_count = 1500;
+        config.api_keys[0].weekly_quota_count = 15000;
+        config.api_keys[1].current_quota_count = 4500;
+        config.api_keys[1].weekly_quota_count = 45000;
+        let mut usage = HashMap::new();
+
+        let mut a = make_usage(None);
+        a.total_count = Some(1500);
+        a.used_count = Some(1500);
+        a.remaining_count = Some(0);
+        a.weekly_total_count = Some(15000);
+        a.weekly_used_count = Some(4200);
+        a.weekly_remaining_count = Some(10800);
+        usage.insert("key-a".to_string(), a);
+
+        let mut b = make_usage(None);
+        b.total_count = Some(4500);
+        b.used_count = Some(350);
+        b.remaining_count = Some(4150);
+        b.weekly_total_count = Some(45000);
+        b.weekly_used_count = Some(8200);
+        b.weekly_remaining_count = Some(36800);
+        usage.insert("key-b".to_string(), b);
+
+        let summary = SummaryUsageData::from_usage_map(&config, &usage);
+        assert_eq!(summary.used_count, Some(1850));
+        assert_eq!(summary.remaining_count, Some(4150));
+        assert_eq!(summary.total_count, Some(6000));
+        assert_eq!(summary.weekly_used_count, Some(12400));
+        assert_eq!(summary.weekly_remaining_count, Some(47600));
+        assert_eq!(summary.weekly_total_count, Some(60000));
+    }
+
+    /// 当前有效总配额 = 当前已使用 + 5h/周剩余交集。
+    /// key-a: 当前 used=1500，周剩余=1200，当前有效剩余=0
+    /// key-b: 当前 used=0，周剩余=0，当前有效剩余=0
+    /// 聚合当前: used=1500, total=1500, remaining=0
+    /// 聚合本周: 58800/1200/60000 => 98%
+    #[test]
+    fn tray_summary_uses_effective_current_total_and_intersects_remaining() {
+        let config = make_multi_key_config();
+        let mut usage = HashMap::new();
+
+        let mut a = make_usage(Some(1200.0 / 15000.0 * 100.0));
+        a.used_count = Some(1500);
+        a.remaining_count = Some(0);
+        a.total_count = Some(0);
+        a.used_percent = Some(100.0);
+        a.weekly_used_count = Some(13800);
+        a.weekly_total_count = Some(15000);
+        a.weekly_remaining_count = Some(1200);
+        usage.insert("key-a".to_string(), a);
+
+        let mut b = make_usage(Some(0.0));
+        b.used_count = Some(0);
+        b.remaining_count = Some(0);
+        b.total_count = Some(0);
+        b.used_percent = Some(0.0);
+        b.weekly_used_count = Some(45000);
+        b.weekly_total_count = Some(45000);
+        b.weekly_remaining_count = Some(0);
+        usage.insert("key-b".to_string(), b);
+
+        let summary = SummaryUsageData::from_usage_map(&config, &usage);
+
+        assert_eq!(summary.used_count, Some(1500));
+        assert_eq!(summary.total_count, Some(1500));
+        assert_eq!(summary.remaining_count, Some(0));
+        // 当前比例: 1500/1500 => 100%
+        assert_eq!(summary.used_percent, Some(100.0));
+        // 本周比例 = (13800 + 45000) / (15000 + 45000) = 98%
+        assert_eq!(summary.weekly_used_percent.map(|p| p.round()), Some(98.0));
+        assert_eq!(
+            format_summary_tray_usage(&summary).as_deref(),
+            Some("100%/98%")
         );
     }
 }

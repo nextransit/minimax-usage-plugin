@@ -66,7 +66,7 @@ test("current remaining display shows the capped current remaining (no weekly mi
   assert.equal(harness.el("current-remaining-wrapper").dataset.source, "current");
 });
 
-test("current remaining respects per-key hard cap (current <= weekly remaining)", () => {
+test("current total equals used plus effective remaining", () => {
   const harness = createAggregateHarness();
   harness.context.state.usageData.keyA = makeUsage({
     used: 20,
@@ -85,10 +85,74 @@ test("current remaining respects per-key hard cap (current <= weekly remaining)"
 
   harness.api.renderAggregateView();
 
-  // keyA: min(1980, 100) = 100; keyB: min(1960, 100) = 100 => 200
+  // 当前有效总配额 = 已使用(60) + 实际可用剩余(200) = 260。
   assert.equal(harness.el("current-remaining").textContent, "200");
+  assert.equal(harness.el("current-total").textContent, "260");
+  assert.equal(harness.el("current-percent").textContent, "23%");
   assert.equal(harness.el("current-remaining").dataset.source, "current");
   assert.equal(harness.el("current-remaining-wrapper").dataset.source, "current");
+});
+
+test("aggregate keeps configured totals and intersects both remaining windows", () => {
+  const harness = createAggregateHarness();
+  harness.context.state.apiKeys[0].current_quota_count = 1500;
+  harness.context.state.apiKeys[0].weekly_quota_count = 15000;
+  harness.context.state.apiKeys[1].current_quota_count = 4500;
+  harness.context.state.apiKeys[1].weekly_quota_count = 45000;
+  harness.context.state.usageData.keyA = makeUsage({
+    used: 1500, total: 1500, weeklyUsed: 4200, weeklyTotal: 15000, lastUpdated: "2026-05-16 12:01:00",
+  });
+  harness.context.state.usageData.keyB = makeUsage({
+    used: 350, total: 4500, weeklyUsed: 8200, weeklyTotal: 45000, lastUpdated: "2026-05-16 12:01:30",
+  });
+
+  const metrics = harness.api.getAggregateMetrics();
+  assert.equal(metrics.used, 1850);
+  assert.equal(metrics.remaining, 4150);
+  assert.equal(metrics.total, 6000);
+  assert.equal(metrics.weeklyUsed, 12400);
+  assert.equal(metrics.weeklyRemaining, 47600);
+  assert.equal(metrics.weeklyTotal, 60000);
+  assert.ok(Math.abs(metrics.usedPercent - 30.833333333333336) < 1e-12);
+});
+
+test("effective aggregate total preserves the used plus remaining invariant", () => {
+  const harness = createAggregateHarness();
+  harness.context.state.apiKeys[1].is_active = false;
+  harness.context.state.usageData.keyA = makeUsage({
+    used: 810, total: 6000, weeklyUsed: 13230, weeklyTotal: 15000, lastUpdated: "2026-05-16 12:01:00",
+  });
+  const metrics = harness.api.getAggregateMetrics();
+  assert.equal(metrics.used, 810);
+  assert.equal(metrics.remaining, 1770);
+  assert.equal(metrics.total, 2580);
+  assert.equal(metrics.usedPercent, (810 / 2580) * 100);
+});
+
+test("missing weekly counts do not turn current availability into zero", () => {
+  const harness = createAggregateHarness();
+  harness.context.state.apiKeys[1].is_active = false;
+  harness.context.state.usageData.keyA = makeUsage({
+    used: 100, total: 1000, weeklyUsed: 0, weeklyTotal: 0, lastUpdated: "2026-05-16 12:01:00",
+  });
+  harness.context.state.usageData.keyA.weekly_total_count = null;
+  harness.context.state.usageData.keyA.weekly_remaining_count = null;
+  const metrics = harness.api.getAggregateMetrics();
+  assert.equal(metrics.total, 1000);
+  assert.equal(metrics.remaining, 900);
+});
+
+test("over-budget usage keeps real used count and clamps availability", () => {
+  const harness = createAggregateHarness();
+  harness.context.state.apiKeys[1].is_active = false;
+  harness.context.state.usageData.keyA = makeUsage({
+    used: 1505, total: 1500, weeklyUsed: 15000, weeklyTotal: 15000, lastUpdated: "2026-05-16 12:01:00",
+  });
+  const metrics = harness.api.getAggregateMetrics();
+  assert.equal(metrics.used, 1505);
+  assert.equal(metrics.remaining, 0);
+  assert.equal(metrics.total, 1505);
+  assert.equal(metrics.usedPercent, 100);
 });
 
 test("weekly-sourced current remaining has a distinct color", () => {
@@ -134,9 +198,10 @@ test("API key breakdown rows bind the visible bar to the same percent as the tex
     is_active: true,
   });
 
-  assert.match(html, /style="--metric-scale: 0\.2500;"/);
+  // 当前周期显示有效配额：used=25，effective remaining=25，total=50。
+  assert.match(html, /style="--metric-scale: 0\.5000;"/);
   assert.match(html, /style="--metric-scale: 0\.7500;"/);
-  assert.match(html, /<span class="metric-pct">25%<\/span>/);
+  assert.match(html, /<span class="metric-pct">50%<\/span>/);
   assert.match(html, /<span class="metric-pct">75%<\/span>/);
   assert.doesNotMatch(html, /metric-bar-fill" style=/);
   assert.doesNotMatch(html, /background:\s*lime/);
@@ -386,13 +451,19 @@ function createBreakdownHarness() {
 function buildAggregateSource() {
   const names = [
     "clampPercent",
+    "normalizeCount",
+    "resolveQuotaCount",
+    "resolveUsedCount",
+    "resolveRemainingCount",
+    "selectRemainingDisplay",
+    "getEffectiveCurrentMetrics",
+    "getEffectiveCurrentRemaining",
     "getStatus",
     "getVisibleKeys",
     "getAggregateMetrics",
     "getAggregatePercent",
     "percentFromUsage",
     "formatMetricScale",
-    "selectRemainingDisplay",
     "updateProgressBar",
     "renderAggregateView",
   ];
@@ -410,6 +481,12 @@ globalThis.__aggregateProgressTestApi = {
 function buildBreakdownSource() {
   const names = [
     "clampPercent",
+    "normalizeCount",
+    "resolveQuotaCount",
+    "resolveUsedCount",
+    "resolveRemainingCount",
+    "selectRemainingDisplay",
+    "getEffectiveCurrentMetrics",
     "getStatus",
     "percentFromUsage",
     "formatMetricScale",
