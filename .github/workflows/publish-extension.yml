@@ -2,20 +2,74 @@ name: Publish VS Code Extension
 
 on:
   push:
+    branches:
+      - master
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
+  pull_request:
   workflow_dispatch:
     inputs:
       version:
-        description: '要发布的版本号，例如 0.0.9'
+        description: '要发布的版本号，例如 0.0.23'
         required: true
         type: string
 
 jobs:
-  publish:
-    name: Publish to VS Code Marketplace
+  verify:
+    name: Compile & Test
     runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Compile TypeScript (strict type check)
+        run: npm run compile
+
+      - name: Run frontend tests
+        run: node --test tests/*.test.cjs
+
+  check-version:
+    name: Check version sync
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compare package.json with Cargo.toml
+        run: |
+          pkg_v=$(jq -r .version package.json)
+          cargo_v=$(grep -m1 '^version' src-tauri/Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          echo "package.json=$pkg_v  Cargo.toml=$cargo_v"
+          if [ "$pkg_v" != "$cargo_v" ]; then
+            echo "::error::版本不一致: package.json=$pkg_v, Cargo.toml=$cargo_v。请同步两者版本。"
+            exit 1
+          fi
+
+      - name: Compare tag with version (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg_v=$(jq -r .version package.json)
+          echo "tag=$tag  package.json=$pkg_v"
+          if [ "$tag" != "$pkg_v" ]; then
+            echo "::error::tag($tag) 与 package.json($pkg_v) 不一致"
+            exit 1
+          fi
+
+  package:
+    name: Package vsix
+    needs: [verify, check-version]
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -32,9 +86,65 @@ jobs:
       - name: Compile TypeScript
         run: npm run compile
 
+      - name: Determine version
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=$(jq -r .version package.json)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Package vsix
+        run: npx --yes @vscode/vsce package --no-dependencies -o minimax-monitor-${{ steps.ver.outputs.version }}.vsix
+
+      - name: Upload vsix artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vsix-${{ steps.ver.outputs.version }}
+          path: minimax-monitor-${{ steps.ver.outputs.version }}.vsix
+          if-no-files-found: error
+
+  publish:
+    name: Publish to Marketplaces & Release
+    needs: [verify, check-version, package]
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Compile TypeScript
+        run: npm run compile
+
+      - name: Determine version
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish to VS Code Marketplace
-        run: npx @vscode/vsce publish -p ${{ secrets.VSCE_PAT }}
+        run: npx --yes @vscode/vsce publish --no-dependencies --skip-duplicate -p ${{ secrets.VSCE_PAT }}
         continue-on-error: true
+
+      - name: Package Marketplace vsix (for Release)
+        run: npx --yes @vscode/vsce package --no-dependencies -o minimax-monitor-${{ steps.ver.outputs.version }}.vsix
 
       - name: Switch publisher to benpay for Open-VSX
         run: |
@@ -42,11 +152,21 @@ jobs:
           jq '.publisher = "benpay"' package.json > package.json.tmp && mv package.json.tmp package.json
 
       - name: Package for Open-VSX
-        run: npx @vscode/vsce package -o minimax-openvsx.vsix
+        run: npx --yes @vscode/vsce package --no-dependencies -o minimax-openvsx-${{ steps.ver.outputs.version }}.vsix
 
       - name: Publish to Open-VSX
-        run: npx ovsx publish minimax-openvsx.vsix -p ${{ secrets.OVSX_PAT }} --skip-duplicate
+        run: npx --yes ovsx publish minimax-openvsx-${{ steps.ver.outputs.version }}.vsix -p ${{ secrets.OVSX_PAT }} --skip-duplicate
         continue-on-error: true
 
       - name: Restore publisher
         run: mv package.json.bak package.json
+
+      - name: Upload vsix to GitHub Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          gh release upload "${{ github.ref_name }}" \
+            minimax-monitor-${{ steps.ver.outputs.version }}.vsix \
+            minimax-openvsx-${{ steps.ver.outputs.version }}.vsix \
+            --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

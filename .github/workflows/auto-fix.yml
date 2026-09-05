@@ -1,0 +1,54 @@
+name: Auto Fix
+
+on:
+  workflow_run:
+    workflows:
+      - 'Publish VS Code Extension'
+      - 'Desktop Build'
+    types: [completed]
+
+jobs:
+  auto-fix:
+    if: github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+      issues: write
+    steps:
+      - name: Checkout failed commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Fetch failed run logs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RUN_ID=${{ github.event.workflow_run.id }}
+          gh run view "$RUN_ID" --log-failed > failed.log 2>&1 || true
+          if [ ! -s failed.log ]; then
+            gh run view "$RUN_ID" --log > failed.log 2>&1 || true
+          fi
+          head -c 24000 failed.log > failed-trunc.log
+          mv failed-trunc.log failed.log
+          echo "failed.log bytes: $(wc -c < failed.log)"
+
+      - name: Run AI auto-fix
+        env:
+          AI_API_KEY: ${{ secrets.AI_API_KEY }}
+          AI_BASE_URL: ${{ secrets.AI_BASE_URL }}
+          AI_MODEL: ${{ secrets.AI_MODEL }}
+          FAILED_LOG_PATH: failed.log
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/auto-fix.cjs
