@@ -72,7 +72,7 @@ export function selectCompactStateIcon(state: CompactState): string {
     case "waiting":
       return "$(sync)";
     case "missingKey":
-      return "⚠";
+      return "$(key)";
     case "error":
       return "$(error)";
   }
@@ -85,13 +85,13 @@ export function getCompactTooltipLabels(language: "zh-CN" | "en"): {
   if (language === "en") {
     return {
       current: "Current:",
-      weekly: "Weekly left:",
+      weekly: "Weekly:",
     };
   }
 
   return {
     current: "当前周期:",
-    weekly: "本周剩余:",
+    weekly: "本周累计:",
   };
 }
 
