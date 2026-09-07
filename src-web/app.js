@@ -89,13 +89,19 @@ function setDialogVisibility(dialogId, isOpen) {
 }
 
 function closeTransientDialogs() {
-  transientDialogIds.forEach((id) => setDialogVisibility(id, false));
+  // 保护: 处于"用户编辑中"的 key-edit-dialog 不应被全局清理（会被 window focus / visibilitychange 触发，
+  //   导致用户已输入的 API Key 被清空，保存按钮看似"无响应"——实则拿到空值）。
+  //   closeTransientDialogs 也会在模块顶层调用一次（此时 state 还未初始化），用 try 守卫 TDZ 错误。
+  let editingKey = false;
+  try { editingKey = state.isEditingKey === true; } catch (_) {}
+  const preserveKeyEdit = editingKey;
+  transientDialogIds.forEach((id) => {
+    if (preserveKeyEdit && id === 'key-edit-dialog') return;
+    setDialogVisibility(id, false);
+  });
 
   const apiKeyInput = document.getElementById('api-key-input');
   if (apiKeyInput) apiKeyInput.blur();
-
-  const keyEditApiKeyInput = document.getElementById('key-edit-api-key');
-  if (keyEditApiKeyInput) keyEditApiKeyInput.value = '';
 }
 
 window.__MINIMAX_CLOSE_TRANSIENT_DIALOGS__ = closeTransientDialogs;
@@ -464,6 +470,7 @@ let state = {
   pendingUpdate: null,                        // { version, notes, pub_date } 当前弹窗中的更新
   updateDownloading: false,                   // 升级下载进行中
   updateDownloadFinished: false,              // 下载完成,等待用户重启
+  isEditingKey: false,                       // key-edit-dialog 正处于用户编辑态（保护输入框不被 window focus 清空）
 };
 
 // Settings state
@@ -2507,6 +2514,7 @@ function renderKeyList() {
 
 function openKeyEditDialog(keyId = null) {
   if (!canOpenTransientDialog()) return;
+  state.isEditingKey = true;
   const dialog = document.getElementById('key-edit-dialog');
   const title = document.getElementById('key-edit-title');
   const idInput = document.getElementById('key-edit-id');
@@ -2570,6 +2578,7 @@ function openKeyEditDialog(keyId = null) {
 
 function closeKeyEditDialog() {
   setDialogVisibility('key-edit-dialog', false);
+  state.isEditingKey = false;
 }
 
 window.addEventListener('focus', () => {
